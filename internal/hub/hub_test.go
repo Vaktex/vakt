@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -345,6 +346,29 @@ func TestInsecureRedirectRefused(t *testing.T) {
 	}
 	if strings.Contains(err.Error(), testToken) || strings.Contains(err.Error(), "token=") {
 		t.Errorf("error leaks query/token: %v", err)
+	}
+}
+
+// A same-host HEAD redirect must not downgrade to http: the token travels on
+// the next request. The endpoint is https, and the redirect points at the
+// same host over plain http.
+func TestHeadRedirectDowngradeRefused(t *testing.T) {
+	clearEnv(t)
+	var hits int
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		w.Header().Set("Location", "http://"+r.Host+r.URL.Path)
+		w.WriteHeader(http.StatusFound)
+	}))
+	t.Cleanup(srv.Close)
+	ep, _ := url.Parse(srv.URL)
+	r := &resolved{o: Options{Repo: testRepo, Revision: "main"}, token: testToken, endpoint: ep, client: srv.Client()}
+	_, err := r.head(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "unexpected redirect") {
+		t.Fatalf("err = %v, want unexpected redirect", err)
+	}
+	if hits != 1 {
+		t.Fatalf("followed the downgrade redirect: %d requests", hits)
 	}
 }
 

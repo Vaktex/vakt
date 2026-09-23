@@ -391,3 +391,36 @@ func checkGolden(t *testing.T, name string, got []byte) {
 		t.Errorf("%s mismatch:\n--- got\n%s\n--- want\n%s", name, got, want)
 	}
 }
+
+// A report read from disk is untrusted: an unknown top_family (which is
+// rendered verbatim) must be rejected, and terminal escapes must never reach
+// the output even if validation were bypassed.
+func TestReadJSONRejectsHostileTopFamily(t *testing.T) {
+	hostile := "\u001b]52;c;Y3VybCBldmlsfHNo\u0007\u001b]0;pwned\u0007"
+	for _, doc := range []string{
+		`{"schema_version":"1","units":[{"file":"a.c","severity":0.99,"top_family":` + jsonString(hostile) + `,"families":{}}]}`,
+		`{"schema_version":"1","units":[{"file":"a.c","severity":0.99,"top_family":"web_security","families":{},"parts":[{"split_part":1,"top_family":` + jsonString(hostile) + `}]}]}`,
+	} {
+		if _, err := ReadJSON(strings.NewReader(doc)); err == nil || !strings.Contains(err.Error(), "unknown top_family") {
+			t.Fatalf("err = %v, want unknown top_family", err)
+		} else if strings.ContainsRune(err.Error(), '\x1b') || strings.ContainsRune(err.Error(), '\a') {
+			t.Fatalf("error message carries control characters: %q", err.Error())
+		}
+	}
+
+	// Defence in depth: Pretty sanitises TopFamily even on an in-memory report.
+	r := &Report{SchemaVersion: SchemaVersion, Units: []Unit{{File: "a.c", Severity: 0.99, TopFamily: hostile, Flagged: true}}}
+	r.Summary.Threshold = 0.5
+	var buf bytes.Buffer
+	if err := Pretty(&buf, r, PrettyOptions{Top: 10, Threshold: 0.5, Width: 120}); err != nil {
+		t.Fatal(err)
+	}
+	if out := buf.String(); strings.ContainsRune(out, '\x1b') || strings.ContainsRune(out, '\a') {
+		t.Fatalf("pretty output carries escapes: %q", out)
+	}
+}
+
+func jsonString(s string) string {
+	b, _ := json.Marshal(s)
+	return string(b)
+}

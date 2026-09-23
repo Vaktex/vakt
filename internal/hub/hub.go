@@ -366,7 +366,9 @@ func (r *resolved) head(ctx context.Context) (fileMeta, error) {
 		commit := resp.Header.Get("X-Repo-Commit")
 		if resp.StatusCode >= 300 && resp.StatusCode < 400 && commit == "" {
 			loc, err := resp.Location()
-			if err != nil || loc.Host != req.URL.Host {
+			// Same host only, and never a downgrade to plain http: the token
+			// travels on the next HEAD.
+			if err != nil || loc.Host != req.URL.Host || loc.Scheme != req.URL.Scheme || !secureURL(loc) {
 				return fileMeta{}, errors.New("hub returned an unexpected redirect")
 			}
 			u = loc.String()

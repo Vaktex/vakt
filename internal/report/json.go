@@ -142,7 +142,26 @@ func ReadJSON(r io.Reader) (*Report, error) {
 	if rep.Files == nil {
 		rep.Files = []File{}
 	}
+	// top_family is rendered verbatim in several places; a report read from
+	// disk is untrusted, so it must name a known family (or be empty).
+	for i := range rep.Units {
+		if err := checkFamily(rep.Units[i].TopFamily); err != nil {
+			return nil, fmt.Errorf("unit %d: %w", i, err)
+		}
+		for j := range rep.Units[i].Parts {
+			if err := checkFamily(rep.Units[i].Parts[j].TopFamily); err != nil {
+				return nil, fmt.Errorf("unit %d part %d: %w", i, j, err)
+			}
+		}
+	}
 	return &rep, nil
+}
+
+func checkFamily(name string) error {
+	if name == "" || labels.Index(name) >= 0 {
+		return nil
+	}
+	return fmt.Errorf("unknown top_family %q", sanitize(name))
 }
 
 // WriteFile writes the report atomically (temp file + rename) with mode 0600.

@@ -226,7 +226,7 @@ func topTable(p *palette, r *Report, v *view, o PrettyOptions) string {
 	for _, u := range rows {
 		st := p.sev(u.Severity, v.thr)
 		sev := st.Render(bar(u.Severity)) + " " + st.Render(fmt.Sprintf("%.2f", u.Severity))
-		fam := pad(fmt.Sprintf("%s %.2f", u.TopFamily, u.TopFamilyProb), famW)
+		fam := pad(fmt.Sprintf("%s %.2f", sanitize(u.TopFamily), u.TopFamilyProb), famW)
 		loc := pad(truncLeft(location(u), locW), locW)
 		name := pad(truncRight(unitName(u), nameW), nameW)
 		line := "  " + sev + "  " + fam + "  " + p.accent.Render(loc) + "  " + name
@@ -287,7 +287,7 @@ func fileTree(p *palette, v *view, o PrettyOptions) string {
 			if u.SplitOf > 0 {
 				lines += fmt.Sprintf(" (%d parts)", u.SplitOf)
 			}
-			tail := "  " + lines + "  " + u.TopFamily
+			tail := "  " + lines + "  " + sanitize(u.TopFamily)
 			nameW := max(8, o.Width-4-3-5-ansi.StringWidth(tail))
 			b.WriteString("    " + p.dim.Render(branch) + " " + p.sev(u.Severity, v.thr).Render(fmt.Sprintf("%.2f", u.Severity)) +
 				" " + truncRight(unitName(u), nameW) + p.dim.Render(tail) + "\n")
