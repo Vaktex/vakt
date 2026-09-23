@@ -132,7 +132,10 @@ prod: ## Obfuscated, stripped release build into dist/$(ASSET)
 
 sign: ## Strip local symbols and codesign (darwin)
 ifeq ($(GOOS),darwin)
-	strip -x $(DIST_DIR)/$(ASSET)
+	@# -ldflags=-s already strips Go symbols. Strip remaining local symbols; with
+	@# cgo frameworks linked, ld64 may keep indirect symbols (non-fatal: the
+	@# audit below is what enforces hygiene).
+	strip -x $(DIST_DIR)/$(ASSET) 2>/dev/null || echo "note: strip -x left some indirect symbols (expected with cgo frameworks)"
 	codesign --force --sign "$${CODESIGN_IDENTITY:--}" \
 		$(if $(CODESIGN_IDENTITY),--timestamp --options runtime,--timestamp=none) \
 		$(DIST_DIR)/$(ASSET)
