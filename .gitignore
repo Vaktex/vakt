@@ -6,6 +6,15 @@
 /third_party/src/
 /testdata/models/
 /testdata/parity/*.safetensors
+/vakt
+*.safetensors
+*.gguf
+*.npz
+*.pt
+*.bin
+.env
+*.pprof
+coverage.*
 *.test
 *.out
 .DS_Store
