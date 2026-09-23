@@ -80,9 +80,15 @@ func Run(ctx context.Context, cfg Config, engines []core.Engine, tok core.Tokeni
 	ctx, cancel := context.WithCancelCause(ctx)
 	defer cancel(nil)
 
-	files := make(chan walk.File, 256)
+	// Each walk.File carries its contents (up to MaxFileBytes), so the files
+	// channel holds only a couple of files per parse worker; with the walker's
+	// own in-flight sends that bounds file bytes to roughly
+	// (2*Jobs + walk jobs) x MaxFileBytes.
+	files := make(chan walk.File, cfg.Jobs)
 	skipsC := make(chan walk.Skip, 256)
-	units := make(chan core.Unit, 1024)
+	// Whole-file units carry up to MaxFileBytes of code; keep the buffer
+	// small enough that it cannot pin gigabytes.
+	units := make(chan core.Unit, 256)
 	encoded := make(chan core.Encoded, 1024)
 	results := make(chan report.Result, 1024)
 
@@ -120,7 +126,12 @@ func Run(ctx context.Context, cfg Config, engines []core.Engine, tok core.Tokeni
 		defer all.Done()
 		defer close(walkDone)
 		defer close(files)
-		walkErr = walk.Walk(ctx, cfg.Root, cfg.Walk, files, skipsC)
+		wo := cfg.Walk
+		if wo.Jobs <= 0 || wo.Jobs > 2*cfg.Jobs {
+			// Walker goroutines each hold one read file while blocked on send.
+			wo.Jobs = max(4, 2*cfg.Jobs)
+		}
+		walkErr = walk.Walk(ctx, cfg.Root, wo, files, skipsC)
 	}()
 
 	// 2. Parse.
@@ -142,6 +153,7 @@ func Run(ctx context.Context, cfg Config, engines []core.Engine, tok core.Tokeni
 					continue
 				}
 				us, err := ast.Extract(ctx, f.Rel, lang, src, cfg.AST)
+				f.Data, src = nil, nil // units hold copies; let the file go
 				if ctx.Err() != nil {
 					return
 				}
