@@ -168,7 +168,7 @@ checksums: ## Write dist/SHA256SUMS (release assets + install.sh)
 	@if [ -f install.sh ]; then cp install.sh $(DIST_DIR)/install.sh; fi
 	cd $(DIST_DIR) && files=$$(ls vakt-* 2>/dev/null | grep -v -- '-fake$$' || true) && \
 		if [ -z "$$files" ]; then echo 'checksums: no release assets in dist/ (fake builds are excluded)'; exit 1; fi && \
-		files="$$files $$( [ -f install.sh ] && echo install.sh )" && \
+		if [ -f install.sh ]; then files="$$files install.sh"; fi && \
 		{ if command -v sha256sum >/dev/null; then sha256sum $$files; else shasum -a 256 $$files; fi; } > SHA256SUMS
 	@cat $(DIST_DIR)/SHA256SUMS
 
