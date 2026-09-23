@@ -62,7 +62,7 @@ setup() {
 	os_release ubuntu 24.04
 	publish vakt-linux-amd64-cuda13
 	cp "$ASSETS/vakt-bin" "$ASSETS/cuda-keyring_1.1-1_all.deb"
-	VAKT_TEST_KEYRING_SHA256=$(shasum -a 256 "$ASSETS/cuda-keyring_1.1-1_all.deb" | cut -d' ' -f1) \
+	VAKT_TEST_MODE=1 VAKT_TEST_KEYRING_SHA256=$(shasum -a 256 "$ASSETS/cuda-keyring_1.1-1_all.deb" | cut -d' ' -f1) \
 		run_installer --version v1.0.0 --yes
 	[ "$status" -eq 0 ]
 	grep -q '^sudo dpkg -i' "$CALLS"

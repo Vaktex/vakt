@@ -40,6 +40,7 @@ os=""
 arch=""
 asset=""
 workdir=""
+tmp_target=""
 bin_dir=""
 sudo_cmd=""
 
@@ -158,6 +159,9 @@ sha256_of() {
 
 cleanup() {
 	if [ -n "$workdir" ] && [ -d "$workdir" ]; then rm -rf "$workdir"; fi
+	# A half-installed temp file in the target bin dir (set in install_binary).
+	# shellcheck disable=SC2086
+	if [ -n "${tmp_target:-}" ] && [ -e "$tmp_target" ]; then $sudo_cmd rm -f "$tmp_target" 2>/dev/null || true; fi
 }
 
 # ---------------------------------------------------------------- arguments
@@ -451,7 +455,11 @@ install_cuda_runtime() {
 keyring_sha256() {
 	# Test hook only: lets the bats suite exercise the install path with a
 	# stub package. Whoever sets it already controls this shell.
-	if [ -n "${VAKT_TEST_KEYRING_SHA256:-}" ]; then echo "$VAKT_TEST_KEYRING_SHA256"; return 0; fi
+	if [ -n "${VAKT_TEST_KEYRING_SHA256:-}" ] && [ "${VAKT_TEST_MODE:-}" = 1 ]; then
+		warn "VAKT_TEST_MODE: using a test cuda-keyring checksum"
+		echo "$VAKT_TEST_KEYRING_SHA256"
+		return 0
+	fi
 	case $1/$2 in
 	ubuntu2204/x86_64) echo d93190d50b98ad4699ff40f4f7af50f16a76dac3bb8da1eaaf366d47898ff8df ;;
 	ubuntu2204/sbsa) echo 36d1aed84dfcf93ee9a0212d149f1c4187db92e03ab96a759ec0689aa438fd9e ;;
@@ -542,6 +550,7 @@ install_binary() {
 		$sudo_cmd chmod 0755 "$tmp_target"
 		# shellcheck disable=SC2086
 		$sudo_cmd mv -f "$tmp_target" "$target"
+		tmp_target=""
 	fi
 	if [ "$os" = darwin ]; then
 		# shellcheck disable=SC2086
