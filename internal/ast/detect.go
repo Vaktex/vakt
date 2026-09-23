@@ -76,10 +76,34 @@ var lockNames = map[string]bool{
 	"pipfile.lock": true, "flake.lock": true, "bun.lockb": true, "mix.lock": true,
 }
 
+// dataDirs are path segments whose JSON/YAML/XML content is data, not
+// configuration: translation catalogues, fixtures, static assets, test
+// corpora. Scoring them costs a large share of a scan for no security
+// signal. Code files in these directories are still scanned.
+var dataDirs = map[string]bool{
+	"i18n": true, "l10n": true, "locale": true, "locales": true, "translations": true, "lang": true,
+	"fixtures": true, "__fixtures__": true, "testdata": true, "test-data": true, "__snapshots__": true,
+	"static": true, "assets": true, "public": true, "data": true, "datasets": true, "samples": true,
+}
+
+var dataLangs = map[string]bool{"JSON": true, "YAML": true, "XML": true, "HTML": true, "CSS": true}
+
 // Detect returns the canonical language of the file at rel (a
 // slash-separated relative path) given its first bytes, and whether it
 // should be scanned at all.
 func Detect(rel string, head []byte) (string, bool) {
+	lang, ok := detect(rel, head)
+	if ok && dataLangs[lang] {
+		for _, seg := range strings.Split(strings.ToLower(path.Dir(rel)), "/") {
+			if dataDirs[seg] {
+				return "", false
+			}
+		}
+	}
+	return lang, ok
+}
+
+func detect(rel string, head []byte) (string, bool) {
 	base := strings.ToLower(path.Base(rel))
 	if lockNames[base] {
 		return "", false

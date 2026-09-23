@@ -143,6 +143,10 @@ func TestDetect(t *testing.T) {
 		{"config.yml", "", "YAML", true},
 		{"x.unknownext", "", "", false},
 		{"noext", "plain text", "", false},
+		{"data/static/i18n/de_DE.json", "{}", "", false},
+		{"test/fixtures/big.xml", "<a/>", "", false},
+		{"data/static/codefixes/fix.ts", "", "TypeScript", true},
+		{"config/default.yml", "", "YAML", true},
 	} {
 		got, ok := Detect(c.rel, []byte(c.head))
 		if got != c.want || ok != c.ok {
