@@ -26,7 +26,7 @@ func (Fake) Score(ctx context.Context, batch [][]int32) ([]core.Scores, error) {
 		h := sha256.New()
 		var b [4]byte
 		for _, id := range ids {
-			binary.LittleEndian.PutUint32(b[:], uint32(id))
+			binary.LittleEndian.PutUint32(b[:], uint32(id)) // #nosec G115 -- bit reinterpretation for hashing is intended
 			h.Write(b[:])
 		}
 		sum := h.Sum(nil)
