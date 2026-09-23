@@ -125,6 +125,19 @@ dep_opts=(
 	-DFETCHCONTENT_SOURCE_DIR_JSON="$deps/json"
 	-DFETCHCONTENT_SOURCE_DIR_FMT="$deps/fmt"
 )
+if [[ "$backend" == cuda ]]; then
+	fetch_pinned cccl https://github.com/NVIDIA/cccl/releases/download/v3.1.3/cccl-v3.1.3.zip \
+		30f388ef784eb691d7de9d2cf918d53ab33464672500a17945b99d16af136cd6
+	fetch "$deps/nvtx3" https://github.com/NVIDIA/NVTX.git v3.1.1 6230bdf710bc94f44d433acceba735aaa9090ba5
+	fetch "$deps/cudnn" https://github.com/NVIDIA/cudnn-frontend.git v1.16.0 be6c079be8aaffa0fc079fcf039887e637c289c7
+	fetch "$deps/cutlass" https://github.com/NVIDIA/cutlass.git v4.3.5 4faf1a1568cf1e4ad8ff71846a13e16f2a6a6f6b
+	dep_opts+=(
+		-DFETCHCONTENT_SOURCE_DIR_CCCL="$deps/cccl"
+		-DFETCHCONTENT_SOURCE_DIR_NVTX3="$deps/nvtx3"
+		-DFETCHCONTENT_SOURCE_DIR_CUDNN="$deps/cudnn"
+		-DFETCHCONTENT_SOURCE_DIR_CUTLASS="$deps/cutlass"
+	)
+fi
 if [[ "$backend" == metal ]]; then
 	fetch_pinned metal_cpp https://developer.apple.com/metal/cpp/files/metal-cpp_26.zip \
 		4df3c078b9aadcb516212e9cb03004cbc5ce9a3e9c068fa3144d021db585a3a4
