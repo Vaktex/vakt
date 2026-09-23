@@ -26,7 +26,7 @@ const (
 	defaultThreshold    = 0.5
 	defaultTop          = 25
 	defaultMinTokens    = 16
-	defaultBatchTokens  = 32768
+	defaultBatchTokens = 4096
 	defaultMaxFileBytes = 2 << 20
 	defaultOut          = brand.Binary + "-report.json"
 	defaultModel        = "hf:" + brand.ModelRepo + "@main"
