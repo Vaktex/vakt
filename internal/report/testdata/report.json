@@ -7,7 +7,7 @@
     "commit": "none"
   },
   "model": {
-    "repo": "vaktex/DOM-0.8B",
+    "repo": "vaktex/dom-0.8b",
     "revision": "main",
     "sha256": "abababababababababababababababababababababababababababababababab",
     "backend": "metal",

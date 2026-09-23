@@ -5,7 +5,7 @@ const (
 	Product   = "Vaktex OSS"
 	Binary    = "vakt"
 	Tagline   = "on watch for vulnerable code"
-	ModelRepo = "vaktex/DOM-0.8B"
+	ModelRepo = "vaktex/dom-0.8b"
 	ModelName = "DOM-0.8B"
 	ModelFile = "model.safetensors"
 )

@@ -93,7 +93,7 @@ Options:
 Environment:
   VAKT_REPO           GitHub owner/repo for releases (default: vaktex/vakt)
   VAKT_VERSION        Same as --version
-  HF_TOKEN            Hugging Face token for the private vaktex/DOM-0.8B model
+  HF_TOKEN            Hugging Face token for the private vaktex/dom-0.8b model
   NO_COLOR            Disable colour
 EOF
 }
@@ -636,14 +636,14 @@ post_install() {
 	token_file=${HF_HOME:-$HOME/.cache/huggingface}/token
 	if [ -z "${HF_TOKEN:-}" ] && [ ! -f "$token_file" ]; then
 		say ""
-		warn "no Hugging Face token found. The DOM-0.8B model (vaktex/DOM-0.8B) is private:"
+		warn "no Hugging Face token found. The DOM-0.8B model (vaktex/dom-0.8b) is private:"
 		say "    export HF_TOKEN=hf_...        # or: hf auth login"
 	fi
 
 	case $opt_summon in
 	no) return 0 ;;
 	yes) do_summon=1 ;;
-	*) if ask "Download the DOM-0.8B model now (~1.7 GB)?"; then do_summon=1; else do_summon=0; fi ;;
+	*) if ask "Download the DOM-0.8B model now (~1.5 GB)?"; then do_summon=1; else do_summon=0; fi ;;
 	esac
 	if [ "$do_summon" = 1 ]; then
 		"$vakt" summon || warn "model download failed; run \`vakt summon\` later"
