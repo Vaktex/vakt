@@ -143,7 +143,11 @@ cpu)
 	;;
 cuda)
 	opts+=(-DMLX_BUILD_METAL=OFF -DMLX_BUILD_CUDA=ON -DMLX_BUILD_CPU=ON
-		-DCMAKE_CUDA_ARCHITECTURES="${CMAKE_CUDA_ARCHITECTURES:-75;80;86;89;90;100;120}")
+		# MLX reads its own MLX_CUDA_ARCHITECTURES and otherwise probes the
+		# local GPU (fails on GPU-less CI). Turing through Blackwell (CUDA 13
+		# dropped anything older).
+		-DMLX_CUDA_ARCHITECTURES="${CUDA_ARCHITECTURES:-75;80;86;89;90;100;120}"
+		-DCMAKE_CUDA_ARCHITECTURES="${CUDA_ARCHITECTURES:-75;80;86;89;90;100;120}")
 	[[ -n "${BLA_STATIC:-}" ]] && opts+=(-DBLA_STATIC="$BLA_STATIC")
 	;;
 esac
