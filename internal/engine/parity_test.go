@@ -243,6 +243,9 @@ func TestDeltaKernelMatchesChunked(t *testing.T) {
 	if testDevice() == "cpu" || !gpuOK() {
 		t.Skip("Metal kernel needs the GPU")
 	}
+	if os.Getenv("VAKT_DELTANET") != "" {
+		t.Skip("VAKT_DELTANET forces one mode; this test compares both")
+	}
 	f := loadFixtures(t)
 	ek := openMock(t, "mock-dom-0.8b", "fp32")
 	t.Setenv("VAKT_DELTANET", "chunked")
@@ -399,5 +402,37 @@ func TestParityBF16Compute(t *testing.T) {
 	}
 	if maxS > 2e-2 || maxP > 2e-2 {
 		t.Errorf("bf16 drift vs fp32 reference: |Δs| %.3g |Δp| %.3g > 2e-2", maxS, maxP)
+	}
+}
+
+// Non-finite hidden states at padded positions must not reach the pooled
+// vector (they get weight 0, but 0 x NaN is NaN).
+func TestPoolIgnoresNonFinitePadding(t *testing.T) {
+	e := openMock(t, "mock-dom-0.8b", "fp32")
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+	x := mlx.NewCtx(e.s)
+	defer x.Free()
+	const B, T = 2, 5
+	h := make([]float32, B*T*hidden)
+	for i := range h {
+		h[i] = float32(i%7) * 0.01
+	}
+	nan := float32(math.NaN())
+	for t2 := 3; t2 < T; t2++ { // row 0: last 2 positions padded and NaN
+		for d := 0; d < hidden; d++ {
+			h[(0*T+t2)*hidden+d] = nan
+		}
+	}
+	mask := []bool{true, true, true, false, false, true, true, true, true, true}
+	pooled, _ := attentionPool(x, e.m.w.pool, x.FromFloat32(h, B, T, hidden), x.FromBool(mask, B, T, 1), B, T)
+	v, err := x.Float32s(pooled)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, f := range v {
+		if math.IsNaN(float64(f)) || math.IsInf(float64(f), 0) {
+			t.Fatalf("pooled[%d] = %v: padded NaN leaked", i, f)
+		}
 	}
 }

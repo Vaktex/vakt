@@ -232,7 +232,7 @@ func TestNoLeak(t *testing.T) {
 }
 
 func TestLoadSafetensors(t *testing.T) {
-	const p = "../../../../../testdata/parity/layers.safetensors"
+	const p = "../../../testdata/parity/layers.safetensors"
 	if _, err := os.Stat(p); err != nil {
 		t.Skip("parity layers not present")
 	}

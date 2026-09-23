@@ -247,6 +247,16 @@ func (e *mlxEngine) Score(ctx context.Context, batch [][]int32) ([]core.Scores, 
 	if err != nil {
 		return nil, err
 	}
+	for _, v := range sv {
+		if math.IsNaN(float64(v)) || math.IsInf(float64(v), 0) {
+			return nil, errors.New("engine: model produced a non-finite score (corrupt weights or numerical overflow)")
+		}
+	}
+	for _, v := range fv {
+		if math.IsNaN(float64(v)) || math.IsInf(float64(v), 0) {
+			return nil, errors.New("engine: model produced a non-finite family probability")
+		}
+	}
 	out := make([]core.Scores, B)
 	for i := range out {
 		out[i].Severity = sv[i]
@@ -268,7 +278,9 @@ const (
 // V, concatenated, projected and LayerNormed. It also returns the per-token
 // weights averaged over heads ([B, T]) for parity tests.
 func attentionPool(x *mlx.Ctx, p poolW, hidden, mask3 *mlx.Array, B, T int) (*mlx.Array, *mlx.Array) {
-	h := x.AsType(hidden, mlx.Float32)                                  // [B, T, H]
+	// Zero padded positions first: they get attention weight 0, but
+	// 0 x NaN is NaN, so a non-finite padded state would poison the row.
+	h := x.Where(mask3, x.AsType(hidden, mlx.Float32), x.Scalar(0))     // [B, T, H]
 	k := x.Reshape(x.Matmul(h, p.keyT), B, T, poolHeads, poolHeadDim)   // [B, T, 4, 256]
 	v := x.Reshape(x.Matmul(h, p.valueT), B, T, poolHeads, poolHeadDim) // [B, T, 4, 256]
 	// scores[b,h,t] = sum_d k[b,t,h,d] * q[h,d]

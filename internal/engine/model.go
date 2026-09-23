@@ -93,6 +93,9 @@ type layerW struct {
 // heads). Raw arrays are released as they are consumed.
 func loadWeights(x *mlx.Ctx, raw map[string]*mlx.Array, prefix string, compute mlx.DType, heads bool) (*weights, error) {
 	var used []string // raw tensors consumed since the last materialise
+	if raw["binary_head.weight"] != nil && raw["pool.query"] == nil {
+		return nil, errors.New("engine: this checkpoint uses the pre-release head layout (mean pool + linear heads); this version of vakt needs the published DOM-0.8B (attention pool + MLP heads)")
+	}
 	get := func(name string) *mlx.Array {
 		a := raw[name]
 		if a == nil {
@@ -202,6 +205,32 @@ func loadWeights(x *mlx.Ctx, raw map[string]*mlx.Array, prefix string, compute m
 	}
 	if err := x.Eval(w.all...); err != nil {
 		return nil, err
+	}
+	if w.heads {
+		// A NaN/Inf anywhere in the pool or heads turns every score into
+		// NaN, which the report would show as 0 ("not vulnerable"). They
+		// are small (~7M floats): check them all once at load.
+		for name, a := range map[string]*mlx.Array{
+			"pool.query": w.pool.query, "pool.key.weight": w.pool.keyT, "pool.value.weight": w.pool.valueT,
+			"pool.project.weight": w.pool.projT, "pool.project.bias": w.pool.projB,
+			"pool.norm.weight": w.pool.normW, "pool.norm.bias": w.pool.normB,
+			"binary_head.net.0.weight": w.bin.lnW, "binary_head.net.0.bias": w.bin.lnB,
+			"binary_head.net.1.weight": w.bin.w1T, "binary_head.net.1.bias": w.bin.b1,
+			"binary_head.net.4.weight": w.bin.w2T, "binary_head.net.4.bias": w.bin.b2,
+			"auxiliary_head.net.0.weight": w.aux.lnW, "auxiliary_head.net.0.bias": w.aux.lnB,
+			"auxiliary_head.net.1.weight": w.aux.w1T, "auxiliary_head.net.1.bias": w.aux.b1,
+			"auxiliary_head.net.4.weight": w.aux.w2T, "auxiliary_head.net.4.bias": w.aux.b2,
+		} {
+			v, err := x.Float32s(a)
+			if err != nil {
+				return nil, err
+			}
+			for _, f := range v {
+				if math.IsNaN(float64(f)) || math.IsInf(float64(f), 0) {
+					return nil, fmt.Errorf("engine: tensor %s contains NaN or Inf", name)
+				}
+			}
+		}
 	}
 	x.Free() // intermediates (raw casts, concatenations) are no longer needed
 	for _, a := range raw {
