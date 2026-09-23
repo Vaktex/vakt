@@ -108,15 +108,15 @@ type File struct {
 type Skip struct{ Rel, Reason string }
 
 type walker struct {
-	ctx      context.Context
-	root     string // resolved absolute root
-	opts     Options
-	out      chan<- File
-	skipped  chan<- Skip
-	sem      chan struct{}
-	wg       sync.WaitGroup
-	mu       sync.Mutex
-	visited  map[string]bool // real dirs already walked (FollowSymlinks only)
+	ctx     context.Context
+	root    string // resolved absolute root
+	opts    Options
+	out     chan<- File
+	skipped chan<- Skip
+	sem     chan struct{}
+	wg      sync.WaitGroup
+	mu      sync.Mutex
+	visited map[string]bool // real dirs already walked (FollowSymlinks only)
 }
 
 // Walk walks root and sends every scannable file on out and every skipped
