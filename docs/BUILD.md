@@ -42,7 +42,7 @@ make checksums         # dist/SHA256SUMS
 scripts/docker/build-linux.sh cuda amd64   # or: all all
 ```
 
-The build uses `nvidia/cuda:13.0.3-cudnn-devel-ubuntu24.04` (CUDA) or `ubuntu:24.04` (CPU). cudart is linked statically. cuBLAS, cuBLASLt, NVRTC and cuDNN come from the host, which needs the CUDA 13 runtime and driver >= 580.
+The build uses `nvidia/cuda:13.0.3-cudnn-devel-ubuntu22.04` (CUDA, pinned by digest) or `ubuntu:22.04` (CPU). The 22.04 base keeps the glibc floor at 2.35, which matches `install.sh`, and `make audit` enforces it. cudart is linked statically. cuBLAS, cuBLASLt, NVRTC and cuDNN come from the host, which needs the CUDA 13 runtime and driver >= 580.
 
 ## Obfuscation and its limits
 
