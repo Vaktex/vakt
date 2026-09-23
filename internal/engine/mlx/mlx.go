@@ -35,6 +35,7 @@ import "C"
 import (
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"runtime"
 	"sync"
@@ -266,6 +267,12 @@ func (x *Ctx) Keep(a *Array) *Array {
 	return a
 }
 
+// Adopt makes the Ctx responsible for releasing a (the inverse of Keep).
+func (x *Ctx) Adopt(a *Array) *Array {
+	x.owned = append(x.owned, a)
+	return a
+}
+
 // Free releases every array created through this Ctx (except kept ones).
 func (x *Ctx) Free() {
 	for _, a := range x.owned {
@@ -340,9 +347,18 @@ func (x *Ctx) binary(op string, f binaryFn, a, b *Array) *Array {
 
 // ---------------------------------------------------------------- constructors
 
+// cInts copies v into C memory. Every value that crosses into mlx-c is a
+// shape, axis or index derived from validated model constants and bounded
+// token counts (<= core.MaxTokens); values outside int32 are clamped so a
+// logic error surfaces as an MLX shape error rather than silent wraparound.
 func cInts(v []int) (*C.int, C.size_t) {
 	if len(v) == 0 {
 		return nil, 0
+	}
+	for i, x := range v {
+		if x > math.MaxInt32 || x < math.MinInt32 {
+			v[i] = -1 // invalid for every mlx-c shape/axis parameter
+		}
 	}
 	p := (*C.int)(C.malloc(C.size_t(len(v)) * C.size_t(unsafe.Sizeof(C.int(0)))))
 	s := unsafe.Slice(p, len(v))

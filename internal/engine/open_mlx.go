@@ -36,8 +36,16 @@ func open(opts Options) (core.Engine, error) {
 	if prec == "" {
 		prec = "fp32"
 	}
-	if prec != "fp32" && prec != "bf16" {
-		return nil, fmt.Errorf("engine: precision must be fp32 or bf16, got %q", prec)
+	switch prec {
+	case "fp32", "bf16":
+	case "tf32":
+		// fp32 weights and activations with TF32 tensor-core matmuls on the
+		// GPU: ~1.7x faster than strict fp32, ~1e-3 drift. MLX reads this
+		// once, before its first op, so it must be set before anything
+		// below touches MLX.
+		_ = os.Setenv("MLX_ENABLE_TF32", "1")
+	default:
+		return nil, fmt.Errorf("engine: precision must be fp32, tf32 or bf16, got %q", prec)
 	}
 
 	// 1. The file is untrusted: validate its header before MLX parses it.
@@ -98,9 +106,10 @@ func open(opts Options) (core.Engine, error) {
 		s.Free()
 		return nil, err
 	}
-	m := &model{w: w, delta: deltaScan}
+	m := &model{w: w, delta: deltaScan, evalEvery: evalEveryFromEnv(1)}
 	if backend == "metal" && os.Getenv("VAKT_DELTANET") != "scan" {
 		m.delta, m.kern = deltaKernel, newDeltaKernel()
+		m.convKern = newConvKernel()
 	}
 	return &mlxEngine{
 		s: s, m: m, maxBT: maxBatchTokens(backend),
@@ -116,6 +125,7 @@ func (e *mlxEngine) Close() error {
 	if e.m != nil {
 		e.m.w.free()
 		e.m.kern.Free()
+		e.m.convKern.Free()
 		e.m = nil
 	}
 	e.s.Free()
@@ -241,4 +251,14 @@ func configureMemory(backend string) {
 	}
 	// Keep a bounded buffer cache so long scans don't grow without limit.
 	mlx.SetCacheLimit(2 << 30)
+}
+
+func evalEveryFromEnv(def int) int {
+	if v := os.Getenv("VAKT_EVAL_EVERY"); v != "" {
+		var n int
+		if _, err := fmt.Sscan(v, &n); err == nil && n >= 0 {
+			return n
+		}
+	}
+	return def
 }

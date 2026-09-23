@@ -452,11 +452,11 @@ func fEqual(r *C.mlx_array, a, b C.mlx_array, s C.mlx_stream) C.int { return C.m
 func fLogAddExp(r *C.mlx_array, a, b C.mlx_array, s C.mlx_stream) C.int {
 	return C.mlx_logaddexp(r, a, b, s)
 }
-func fRsqrt(r *C.mlx_array, a C.mlx_array, s C.mlx_stream) C.int    { return C.mlx_rsqrt(r, a, s) }
-func fSqrt(r *C.mlx_array, a C.mlx_array, s C.mlx_stream) C.int     { return C.mlx_sqrt(r, a, s) }
-func fExp(r *C.mlx_array, a C.mlx_array, s C.mlx_stream) C.int      { return C.mlx_exp(r, a, s) }
-func fLog(r *C.mlx_array, a C.mlx_array, s C.mlx_stream) C.int      { return C.mlx_log(r, a, s) }
-func fLog1p(r *C.mlx_array, a C.mlx_array, s C.mlx_stream) C.int    { return C.mlx_log1p(r, a, s) }
-func fSigmoid(r *C.mlx_array, a C.mlx_array, s C.mlx_stream) C.int  { return C.mlx_sigmoid(r, a, s) }
-func fNeg(r *C.mlx_array, a C.mlx_array, s C.mlx_stream) C.int      { return C.mlx_negative(r, a, s) }
-func fSquare(r *C.mlx_array, a C.mlx_array, s C.mlx_stream) C.int   { return C.mlx_square(r, a, s) }
+func fRsqrt(r *C.mlx_array, a C.mlx_array, s C.mlx_stream) C.int   { return C.mlx_rsqrt(r, a, s) }
+func fSqrt(r *C.mlx_array, a C.mlx_array, s C.mlx_stream) C.int    { return C.mlx_sqrt(r, a, s) }
+func fExp(r *C.mlx_array, a C.mlx_array, s C.mlx_stream) C.int     { return C.mlx_exp(r, a, s) }
+func fLog(r *C.mlx_array, a C.mlx_array, s C.mlx_stream) C.int     { return C.mlx_log(r, a, s) }
+func fLog1p(r *C.mlx_array, a C.mlx_array, s C.mlx_stream) C.int   { return C.mlx_log1p(r, a, s) }
+func fSigmoid(r *C.mlx_array, a C.mlx_array, s C.mlx_stream) C.int { return C.mlx_sigmoid(r, a, s) }
+func fNeg(r *C.mlx_array, a C.mlx_array, s C.mlx_stream) C.int     { return C.mlx_negative(r, a, s) }
+func fSquare(r *C.mlx_array, a C.mlx_array, s C.mlx_stream) C.int  { return C.mlx_square(r, a, s) }

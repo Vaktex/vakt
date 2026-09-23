@@ -49,6 +49,40 @@ const gatedDeltaSource = `
     }
 `
 
+// convSiluSource is the causal depthwise conv (kernel K) followed by SiLU,
+// one thread per output element: y[b,t,c] = silu(sum_k w[k,c] * x[b,t-K+1+k,c]),
+// accumulated in float32. x is [B,T,C], w is [K,C].
+const convSiluSource = `
+    const uint c = thread_position_in_grid.x;
+    const uint t = thread_position_in_grid.y;
+    const uint b = thread_position_in_grid.z;
+    if (c >= C || t >= T) { return; }
+    float acc = 0.0f;
+    for (int k = 0; k < K; ++k) {
+        const int src = int(t) - (K - 1) + k;
+        if (src >= 0) {
+            acc += float(w[k * C + c]) * float(x[(size_t(b) * T + src) * C + c]);
+        }
+    }
+    const float s = acc / (1.0f + metal::precise::exp(-acc));
+    y[(size_t(b) * T + t) * C + c] = static_cast<OutT>(s);
+`
+
+func newConvKernel() *mlx.Kernel {
+	return mlx.NewKernel("vakt_causal_conv_silu", []string{"x", "w"}, []string{"y"}, convSiluSource, "")
+}
+
+func (m *model) convSilu(x *mlx.Ctx, in *mlx.Array, taps *mlx.Array, B, T, C int) *mlx.Array {
+	out := x.Apply(m.convKern, []*mlx.Array{x.Contiguous(in), taps}, mlx.KernelLaunch{
+		Grid:           [3]int{C, T, B},
+		ThreadGroup:    [3]int{256, 1, 1},
+		Outputs:        []mlx.KernelOutput{{Shape: []int{B, T, C}, Dtype: in.Dtype()}},
+		TemplateInts:   map[string]int{"T": T, "C": C, "K": convKernel},
+		TemplateDtypes: map[string]mlx.DType{"OutT": in.Dtype()},
+	})
+	return out[0]
+}
+
 func newDeltaKernel() *mlx.Kernel {
 	return mlx.NewKernel("vakt_gated_delta", []string{"q", "k", "v", "g", "beta"}, []string{"y"}, gatedDeltaSource, "")
 }

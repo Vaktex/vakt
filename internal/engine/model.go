@@ -53,12 +53,13 @@ type layerW struct {
 	down             *mlx.Array // [I, H]
 
 	// linear attention
-	inProj  *mlx.Array // [H, 6144+2048+16+16] fused qkv|z|b|a, transposed
-	convW   *mlx.Array // [6144, K, 1] (MLX depthwise layout)
-	aLogNeg *mlx.Array // [16] = -exp(A_log), f32
-	dtBias  *mlx.Array // [16] f32
-	gnorm   *mlx.Array // [128] plain w (RMSNormGated)
-	outProj *mlx.Array // [2048, H]
+	inProj     *mlx.Array   // [H, 6144+2048+16+16] fused qkv|z|b|a, transposed
+	convTaps   []*mlx.Array // K arrays of [6144]: tap k of the depthwise conv
+	convTapsKC *mlx.Array   // the same taps stacked [K, 6144] (Metal kernel)
+	aLogNeg    *mlx.Array   // [16] = -exp(A_log), f32
+	dtBias     *mlx.Array   // [16] f32
+	gnorm      *mlx.Array   // [128] plain w (RMSNormGated)
+	outProj    *mlx.Array   // [2048, H]
 
 	// full attention
 	qkv   *mlx.Array // [H, 4096+512+512] fused q(+gate)|k|v, transposed
@@ -120,8 +121,13 @@ func loadWeights(x *mlx.Ctx, raw map[string]*mlx.Array, prefix string, compute m
 		} else {
 			a := lp + "linear_attn."
 			L.inProj = keep(lin(a+"in_proj_qkv.weight", a+"in_proj_z.weight", a+"in_proj_b.weight", a+"in_proj_a.weight"))
-			// PyTorch depthwise conv weight [C, 1, K] -> MLX [C, K, 1].
-			L.convW = keep(x.Contiguous(x.Transpose(cast(get(a+"conv1d.weight")), 0, 2, 1)))
+			// PyTorch depthwise conv weight [C, 1, K] -> K contiguous [C] taps.
+			cw := cast(get(a + "conv1d.weight"))
+			for k := 0; k < convKernel; k++ {
+				tap := x.Reshape(x.Slice(cw, []int{0, 0, k}, []int{linQKVDim, 1, k + 1}, nil), linQKVDim)
+				L.convTaps = append(L.convTaps, keep(x.Contiguous(tap)))
+			}
+			L.convTapsKC = keep(x.Contiguous(x.Transpose(x.Reshape(cw, linQKVDim, convKernel), 1, 0)))
 			L.aLogNeg = keep(x.Negative(x.Exp(f32(get(a + "A_log")))))
 			L.dtBias = keep(f32(get(a + "dt_bias")))
 			L.gnorm = keep(f32(get(a + "norm.weight")))
@@ -161,31 +167,60 @@ const (
 
 // model is the forward pass.
 type model struct {
-	w     *weights
-	delta deltaMode
-	kern  *mlx.Kernel
+	w         *weights
+	delta     deltaMode
+	kern      *mlx.Kernel
+	convKern  *mlx.Kernel
+	evalEvery int // materialise the residual every N layers (0 = one graph)
 }
 
 // forward returns the float32 last hidden state after the final norm,
 // [B, T, H], for right-padded ids [B, T] with per-row lengths.
+//
+// Layers are built in a scratch Ctx that is evaluated and released every
+// evalEvery layers. A single lazy graph over all 24 layers keeps every
+// intermediate alive until the end (gigabytes at long lengths) and was ~90x
+// slower in practice; materialising the residual stream per layer keeps the
+// working set to one layer's activations.
 func (m *model) forward(x *mlx.Ctx, ids *mlx.Array, mask *mlx.Array, lengths []int, B, T int) *mlx.Array {
 	w := m.w
-	h := x.Take(w.embed, ids, 0) // [B, T, H]
+	h := x.Take(w.embed, ids, 0) // [B, T, H], owned by x
+	lx := mlx.NewCtx(x.S)        // per-segment scratch
+	defer lx.Free()
 	for i, L := range w.layers {
 		r := h
-		n := m.rmsNorm(x, h, L.inNorm)
+		n := m.rmsNorm(lx, h, L.inNorm)
 		var mixed *mlx.Array
 		if isFull(i) {
-			mixed = m.attention(x, n, L, B, T)
+			mixed = m.attention(lx, n, L, B, T)
 		} else {
-			mixed = m.linearAttention(x, n, mask, L, lengths, B, T)
+			mixed = m.linearAttention(lx, n, mask, L, lengths, B, T)
 		}
-		h = x.Add(r, mixed)
+		h = lx.Add(r, mixed)
 		r = h
-		n = m.rmsNorm(x, h, L.postNorm)
-		h = x.Add(r, m.mlp(x, n, L))
+		n = m.rmsNorm(lx, h, L.postNorm)
+		h = lx.Add(r, m.mlp(lx, n, L))
+		if m.evalEvery > 0 && (i+1)%m.evalEvery == 0 {
+			if err := lx.Eval(h); err != nil {
+				x.Fail(err)
+				return x.Zeros(mlx.Float32, B, T, hidden)
+			}
+			// Hand the residual to the caller's Ctx, drop everything else.
+			lx.Keep(h)
+			x.Adopt(h)
+			lx.Free()
+		}
 	}
-	return m.rmsNorm(x, h, w.norm)
+	if err := lx.Err(); err != nil {
+		x.Fail(err)
+	}
+	out := m.rmsNorm(lx, h, w.norm)
+	if err := lx.Eval(out); err != nil {
+		x.Fail(err)
+		return x.Zeros(mlx.Float32, B, T, hidden)
+	}
+	lx.Keep(out)
+	return x.Adopt(out)
 }
 
 // rmsNorm matches Qwen3_5RMSNorm: normalise in float32, multiply by (1+w)
@@ -237,17 +272,22 @@ func (m *model) linearAttention(x *mlx.Ctx, h, mask *mlx.Array, L layerW, length
 	p := x.SplitAt(proj, -1, linQKVDim, linQKVDim+linValueWidth, linQKVDim+linValueWidth+linHeads)
 	mixed, z, bb, aa := p[0], p[1], p[2], p[3]
 
-	// Depthwise causal conv (kernel 4) + SiLU over the q|k|v channels.
-	conv := x.Conv1d(mixed, L.convW, 1, convKernel-1, 1, linQKVDim)
-	conv = x.Slice(conv, []int{0, 0, 0}, []int{B, T, linQKVDim}, nil)
-	conv = x.Silu(conv)
+	// Depthwise causal conv (kernel 4) + SiLU over the q|k|v channels,
+	// written as K shifted multiply-adds: y[t] = sum_k w[k] * x[t-(K-1)+k].
+	// MLX's general conv1d is ~10x slower for this tiny depthwise kernel.
+	var conv *mlx.Array
+	if m.convKern != nil {
+		conv = m.convSilu(x, mixed, L.convTapsKC, B, T, linQKVDim)
+	} else {
+		conv = x.Silu(causalDepthwise(x, mixed, L.convTaps, B, T, linQKVDim))
+	}
 
 	qkv := x.SplitAt(conv, -1, linHeads*linKeyDim, 2*linHeads*linKeyDim)
 	q := x.Reshape(x.AsType(qkv[0], mlx.Float32), B, T, linHeads, linKeyDim)
 	k := x.Reshape(x.AsType(qkv[1], mlx.Float32), B, T, linHeads, linKeyDim)
 	v := x.Reshape(x.AsType(qkv[2], mlx.Float32), B, T, linHeads, linValDim)
 
-	beta := x.Sigmoid(x.AsType(bb, mlx.Float32))                                        // [B, T, 16]
+	beta := x.Sigmoid(x.AsType(bb, mlx.Float32))                                       // [B, T, 16]
 	g := x.Multiply(L.aLogNeg, x.Softplus(x.Add(x.AsType(aa, mlx.Float32), L.dtBias))) // [B, T, 16]
 
 	// l2norm(q), l2norm(k) with eps 1e-6, then q *= 1/sqrt(dk).
@@ -267,6 +307,25 @@ func (m *model) linearAttention(x *mlx.Ctx, h, mask *mlx.Array, L layerW, length
 	o := x.Multiply(x.RMSNorm(core, L.gnorm, rmsEps), x.Silu(zf))
 	o = x.AsType(x.Reshape(o, B, T, linValueWidth), h.Dtype())
 	return x.Matmul(o, L.outProj)
+}
+
+// causalDepthwise computes a causal depthwise conv over [B, T, C] with taps
+// [K][C] (taps[k] multiplies the input shifted by K-1-k), summing in the
+// input's dtype like PyTorch's conv1d.
+func causalDepthwise(x *mlx.Ctx, in *mlx.Array, taps []*mlx.Array, B, T, C int) *mlx.Array {
+	K := len(taps)
+	padded := x.Concatenate(1, x.Zeros(in.Dtype(), B, K-1, C), in) // [B, T+K-1, C]
+	var acc *mlx.Array
+	for k := 0; k < K; k++ {
+		win := x.Slice(padded, []int{0, k, 0}, []int{B, k + T, C}, nil)
+		term := x.Multiply(win, taps[k])
+		if acc == nil {
+			acc = term
+		} else {
+			acc = x.Add(acc, term)
+		}
+	}
+	return acc
 }
 
 func l2norm(x *mlx.Ctx, a *mlx.Array) *mlx.Array {
