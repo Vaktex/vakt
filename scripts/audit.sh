@@ -34,6 +34,9 @@ leaks=$(strings -a "$bin" | grep -oE \
 	-e '/Users/[A-Za-z][^ ]{0,40}' \
 	-e '/home/[A-Za-z][^ ]{0,40}' \
 	-e '/root/[^ ]{0,40}' \
+	-e '(^|[^A-Za-z0-9._-])/src/[A-Za-z][^ ]{0,40}' \
+	-e '/Users/runner/[^ ]{0,40}' \
+	-e '/home/runner/[^ ]{0,40}' \
 	-e '/\.cargo/(registry|git)[^ ]{0,40}' \
 	-e '/src/third_party[^ ]{0,40}' \
 	-e 'vakt/(internal|cmd)/[^ ]{0,40}' \
@@ -56,6 +59,17 @@ Darwin)
 	;;
 Linux)
 	if readelf -S "$bin" 2>/dev/null | grep -q '\.debug_'; then bad "debug sections present"; else pass "no debug sections"; fi
+	# install.sh promises glibc >= MAX_GLIBC (Ubuntu 22.04). Building on a
+	# newer glibc silently raises the floor via symbol versions.
+	max_glibc=${MAX_GLIBC:-2.35}
+	need=$(objdump -T "$bin" 2>/dev/null | grep -oE 'GLIBC_[0-9]+(\.[0-9]+)+' | sed 's/GLIBC_//' | sort -uV | tail -n 1)
+	if [ -z "$need" ]; then
+		pass "no glibc symbol versions (static?)"
+	elif [ "$(printf '%s\n%s\n' "$need" "$max_glibc" | sort -V | tail -n 1)" = "$max_glibc" ]; then
+		pass "glibc requirement $need <= $max_glibc"
+	else
+		bad "binary needs glibc $need > supported $max_glibc (build on an older base image)"
+	fi
 	;;
 *)
 	bad "unsupported audit host: $(uname -s)"
