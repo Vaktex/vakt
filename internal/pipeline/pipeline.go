@@ -14,6 +14,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"golang.org/x/sync/semaphore"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -89,6 +90,9 @@ func Run(ctx context.Context, cfg Config, engines []core.Engine, tok core.Tokeni
 	// Whole-file units carry up to MaxFileBytes of code; keep the buffer
 	// small enough that it cannot pin gigabytes.
 	units := make(chan core.Unit, 256)
+	// Source bytes of units waiting to be tokenized are bounded separately:
+	// whole-file units are up to MaxFileBytes each.
+	inflight := semaphore.NewWeighted(maxInflightSourceBytes)
 	encoded := make(chan core.Encoded, 1024)
 	results := make(chan report.Result, 1024)
 
@@ -163,10 +167,15 @@ func Run(ctx context.Context, cfg Config, engines []core.Engine, tok core.Tokeni
 				prog.FilesParsed.Add(1)
 				nFiles.Add(1)
 				for _, u := range us {
+					w := unitWeight(u)
+					if err := inflight.Acquire(ctx, w); err != nil {
+						return
+					}
 					select {
 					case units <- u:
 						prog.Units.Add(1)
 					case <-ctx.Done():
+						inflight.Release(w)
 						return
 					}
 				}
@@ -191,7 +200,10 @@ func Run(ctx context.Context, cfg Config, engines []core.Engine, tok core.Tokeni
 			defer all.Done()
 			defer wgTok.Done()
 			for u := range units {
-				for _, e := range encodeUnit(u, tok) {
+				w := unitWeight(u)
+				es := encodeUnit(u, tok)
+				inflight.Release(w)
+				for _, e := range es {
 					if cfg.MinTokens > 0 && len(e.IDs) < cfg.MinTokens {
 						continue
 					}
@@ -320,6 +332,15 @@ func Run(ctx context.Context, cfg Config, engines []core.Engine, tok core.Tokeni
 	return report.Build(meta, out, cfg.Threshold), nil
 }
 
+// maxInflightSourceBytes bounds unit source waiting for the tokenizers.
+const maxInflightSourceBytes = 64 << 20
+
+// unitWeight is a unit's weight against maxInflightSourceBytes (at least 1,
+// at most the whole budget so one huge unit can always proceed).
+func unitWeight(u core.Unit) int64 {
+	return min(max(int64(len(u.Code)), 1), maxInflightSourceBytes)
+}
+
 // encodeUnit renders the training prompt, splits units whose prompt exceeds
 // the context, and truncates as a last resort (as training did).
 func encodeUnit(u core.Unit, tok core.Tokenizer) []core.Encoded {
@@ -327,6 +348,7 @@ func encodeUnit(u core.Unit, tok core.Tokenizer) []core.Encoded {
 	// prompt exceeds the context pay for SplitOversize's search.
 	text := tokenize.Render(u.Language, u.Code)
 	if ids, err := tok.Encode(text); err == nil && len(ids) > 0 && len(ids) <= core.MaxTokens {
+		u.Code = "" // downstream needs only IDs; never retain the source
 		return []core.Encoded{{Unit: u, IDs: ids, Key: tokenize.PromptKey(text)}}
 	}
 	// Oversize: SplitOversize bounds its search window near the budget, so
@@ -340,6 +362,7 @@ func encodeUnit(u core.Unit, tok core.Tokenizer) []core.Encoded {
 		if err != nil || len(ids) == 0 {
 			continue
 		}
+		p.Code = "" // parts are substrings of the parent: drop them all
 		e := core.Encoded{Unit: p, IDs: ids, Key: tokenize.PromptKey(text)}
 		if len(ids) > core.MaxTokens {
 			e.IDs, e.Truncated = ids[:core.MaxTokens], true
