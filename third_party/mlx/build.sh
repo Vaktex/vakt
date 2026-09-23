@@ -227,10 +227,14 @@ cmake --install "$build/mlx"
 # 2) mlx-c against the installed MLX
 mlxc_opts=()
 if [[ "$backend" == cuda ]]; then
-	# MLX's exported config links CUDA::cublasLt etc. but does not call
-	# find_package(CUDAToolkit) itself, so mlx-c's configure fails without it.
+	# MLX's exported config links CUDA::cublasLt and CUDNN::cudnn_all but
+	# calls neither find_package(CUDAToolkit) nor its own installed
+	# FindCUDNN.cmake, so mlx-c's configure fails without them.
 	inc="$build/mlxc-cuda-deps.cmake"
-	printf 'find_package(CUDAToolkit REQUIRED)\n' > "$inc"
+	printf '%s\n' \
+		'find_package(CUDAToolkit REQUIRED)' \
+		"list(APPEND CMAKE_MODULE_PATH \"$prefix/share/cmake/MLX\")" \
+		'find_package(CUDNN REQUIRED)' > "$inc"
 	mlxc_opts+=(-DCMAKE_PROJECT_INCLUDE_BEFORE="$inc")
 fi
 cmake -S "$src/mlx-c" -B "$build/mlx-c" "${opts[@]}" ${mlxc_opts[@]+"${mlxc_opts[@]}"} -DMLX_DIR="$prefix/share/cmake/MLX"
