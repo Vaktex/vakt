@@ -45,7 +45,7 @@ func nativeScan(ctx context.Context, o ScanOptions, prog *report.Progress) (*rep
 	var engines []core.Engine
 	defer func() {
 		for _, e := range engines {
-			e.Close()
+			_ = e.Close() // scan result or error already decided
 		}
 	}()
 	for _, d := range devices {
