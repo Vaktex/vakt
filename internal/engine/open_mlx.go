@@ -313,6 +313,9 @@ func evalEveryFromEnv(def int) int {
 // maxBatchSeqs caps the number of sequences in one Score call.
 const maxBatchSeqs = 256
 
+// MaxBatchSeqs is the most sequences one Score call accepts.
+func (e *mlxEngine) MaxBatchSeqs() int { return maxBatchSeqs }
+
 // checkLoaded verifies every expected tensor's loaded shape and dtype.
 func checkLoaded(raw map[string]*mlx.Array, want []safetensors.Expect) error {
 	for _, e := range want {
