@@ -1,0 +1,19 @@
+Vaktex OSS dev · DOM-0.8B main abababababab · metal · Apple M5 Pro · fp32
+5 files · 6 units · 2.5s · 13.2k tok/s · 1 cached
+
+Top findings  2 of 2 flagged (severity ≥ 0.50)
+  SEVERITY         FAMILY              LOCATION            UNIT          LANG
+  █████████░ 0.93  memory_safety 0.91  src/net.c:12-48     read_packet   C
+  █████████░ 0.88  memory_safety 0.90  src/parse.c:10-400  parse_header  C
+
+Families  top family of each flagged unit
+  memory_safety  ▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇ 2
+
+Flagged files
+  0.93 src/net.c  1 of 2 units
+    └─ 0.93 read_packet  12-48  memory_safety
+  0.88 src/parse.c  1 of 1 unit
+    └─ 0.88 parse_header  10-400 (2 parts)  memory_safety
+
+1 file skipped (see the JSON report for reasons)
+2 units flagged across 2 files (memory_safety 2)

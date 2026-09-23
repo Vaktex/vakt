@@ -14,12 +14,17 @@ import (
 type Options struct {
 	// ModelPath is a local model.safetensors path (already downloaded).
 	ModelPath string
-	// Precision is "fp32" (default, parity-grade) or "bf16".
+	// Precision is "fp32" (default, parity-grade: strict float32 math),
+	// "tf32" (float32 with TF32 GPU matmuls, ~1.7x faster, ~1e-3 drift) or
+	// "bf16" (bfloat16 matmuls, ~2x faster, ~3e-2 drift).
 	Precision string
 	// Device is "auto", "gpu" or "cpu".
 	Device string
 	// DeviceIndex selects a GPU when several are present (CUDA only).
 	DeviceIndex int
+	// ModelSHA is the file's sha256 if already known (hub computes it while
+	// downloading); empty means the engine hashes the file itself.
+	ModelSHA string
 }
 
 // ErrUnavailable is returned by Open when the binary was built without a

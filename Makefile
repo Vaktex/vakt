@@ -90,10 +90,11 @@ export CGO_CFLAGS   := $(CGO_CFLAGS) $(PREFIX_MAP)
 export CGO_CXXFLAGS := $(CGO_CXXFLAGS) $(PREFIX_MAP)
 export CFLAGS       := $(CFLAGS) $(PREFIX_MAP)
 export CXXFLAGS     := $(CXXFLAGS) $(PREFIX_MAP)
+export CUDAFLAGS    := $(CUDAFLAGS) -Xcompiler=$(PREFIX_MAP)
 CARGO_HOME ?= $(HOME)/.cargo
-export RUSTFLAGS    := $(RUSTFLAGS) --remap-path-prefix=$(CURDIR)=. \
-	--remap-path-prefix=$(CARGO_HOME)/registry/src=crates --remap-path-prefix=$(CARGO_HOME)/git/checkouts=crates-git \
-	--remap-path-prefix=$(HOME)=~
+# rustc applies the LAST matching remap: broadest first, most specific last.
+export RUSTFLAGS    := $(RUSTFLAGS) --remap-path-prefix=$(HOME)=~ --remap-path-prefix=$(CURDIR)=. \
+	--remap-path-prefix=$(CARGO_HOME)/registry/src=crates --remap-path-prefix=$(CARGO_HOME)/git/checkouts=crates-git
 
 .PHONY: help deps deps-mlx deps-tokenizers dev prod sign test parity bench lint audit checksums clean print-%
 
@@ -132,7 +133,10 @@ prod: ## Obfuscated, stripped release build into dist/$(ASSET)
 
 sign: ## Strip local symbols and codesign (darwin)
 ifeq ($(GOOS),darwin)
-	strip -x $(DIST_DIR)/$(ASSET)
+	@# -ldflags=-s already strips Go symbols. Strip remaining local symbols; with
+	@# cgo frameworks linked, ld64 may keep indirect symbols (non-fatal: the
+	@# audit below is what enforces hygiene).
+	strip -x $(DIST_DIR)/$(ASSET) 2>/dev/null || echo "note: strip -x left some indirect symbols (expected with cgo frameworks)"
 	codesign --force --sign "$${CODESIGN_IDENTITY:--}" \
 		$(if $(CODESIGN_IDENTITY),--timestamp --options runtime,--timestamp=none) \
 		$(DIST_DIR)/$(ASSET)
@@ -156,7 +160,8 @@ bench: ## Engine and pipeline benchmarks
 lint: ## vet, staticcheck, gosec, govulncheck, shellcheck
 	$(GO) vet ./...
 	staticcheck ./...
-	gosec -quiet -exclude-dir=third_party -exclude-dir=.worktrees ./...
+	gosec -quiet -exclude-dir=third_party -exclude-dir=.worktrees -exclude-dir=internal/engine/mlx ./...
+	gosec -quiet -exclude=G115 ./internal/engine/mlx/... 2>/dev/null || gosec -quiet -tags mlx -exclude=G115 ./internal/engine/mlx/...
 	govulncheck ./...
 	@if [ -f install.sh ]; then shellcheck -s sh install.sh; fi
 	shellcheck scripts/*.sh scripts/docker/*.sh

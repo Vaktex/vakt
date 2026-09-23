@@ -9,7 +9,7 @@ setup_stubs() {
 	CALLS="$BATS_TEST_TMPDIR/calls.log"
 	ASSETS="$BATS_TEST_TMPDIR/assets"
 	PREFIX="$BATS_TEST_TMPDIR/prefix"
-	export STUBS CALLS ASSETS PREFIX
+	export STUBS CALLS ASSETS PREFIX BLAS_LIBS
 	mkdir -p "$STUBS" "$ASSETS"
 	: >"$CALLS"
 
@@ -17,7 +17,7 @@ setup_stubs() {
 	stub sysctl 'echo "${STUB_TRANSLATED:-0}"'
 	stub getconf 'if [ -n "${STUB_GLIBC-2.39}" ]; then echo "glibc ${STUB_GLIBC-2.39}"; else exit 1; fi'
 	stub ldd 'echo "${STUB_LDD:-ldd (GNU libc) ${STUB_GLIBC-2.39}}"'
-	stub ldconfig 'printf "%s" "${STUB_LDCONFIG:-}"'
+	stub ldconfig 'if [ -z "${STUB_NO_BLAS:-}" ]; then printf "%s" "$BLAS_LIBS"; fi; printf "%s" "${STUB_LDCONFIG:-}"'
 	stub id 'if [ "$1" = -u ]; then echo "${STUB_UID:-1000}"; else /usr/bin/id "$@"; fi'
 	stub sudo '"$@"'
 	stub dpkg 'exit 0'
@@ -50,7 +50,7 @@ cp "$ASSETS/$name" "$out"'
 
 # ldconfig reflects libraries "installed" by the apt stub.
 stub_ldconfig_dynamic() {
-	stub ldconfig 'if [ -f "$STUBS/.ldconfig_after" ]; then cat "$STUBS/.ldconfig_after"; else printf "%s" "${STUB_LDCONFIG:-}"; fi'
+	stub ldconfig 'printf "%s" "$BLAS_LIBS"; if [ -f "$STUBS/.ldconfig_after" ]; then cat "$STUBS/.ldconfig_after"; else printf "%s" "${STUB_LDCONFIG:-}"; fi'
 }
 
 stub() {
@@ -83,6 +83,9 @@ run_installer() {
 		run "${VAKT_TEST_SHELL:-sh}" "$INSTALL_SH" --prefix "$PREFIX" --no-summon "$@" </dev/null
 }
 
+BLAS_LIBS='	libopenblas.so.0 (libc6,x86-64) => /usr/lib/x86_64-linux-gnu/libopenblas.so.0
+	liblapack.so.3 (libc6,x86-64) => /usr/lib/x86_64-linux-gnu/liblapack.so.3
+'
 CUDA_LIBS_ALL='	libcublas.so.13 (libc6,x86-64) => /usr/lib/x86_64-linux-gnu/libcublas.so.13
 	libcublasLt.so.13 (libc6,x86-64) => /usr/lib/x86_64-linux-gnu/libcublasLt.so.13
 	libnvrtc.so.13 (libc6,x86-64) => /usr/lib/x86_64-linux-gnu/libnvrtc.so.13
