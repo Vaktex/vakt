@@ -2,6 +2,7 @@ package ast
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -399,5 +400,16 @@ func TestCompletenessRegressions(t *testing.T) {
 		if u.Name == "bar" && u.StartLine != 2 {
 			t.Errorf("explicit instantiation attached: bar starts at %d", u.StartLine)
 		}
+	}
+}
+
+// The vendored VBA grammar must match the provenance recorded in its binding.
+func TestVBAProvenance(t *testing.T) {
+	b, err := os.ReadFile("../../third_party/tree-sitter-vba/parser.c")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := fmt.Sprintf("%x", sha256.Sum256(b)); got != "1ec8fc0c44c49fd15da2174a4db92824c4be048c074689e8e0b8962a2ab81e0a" {
+		t.Fatalf("parser.c sha256 %s; update third_party/tree-sitter-vba/binding.go and README", got)
 	}
 }

@@ -1,7 +1,7 @@
 // Package tree_sitter_vba is the VBA tree-sitter grammar from
 // github.com/harumiWeb/tree-sitter-vba (MIT, see LICENSE), vendored at commit
 // a67fd2ddeb577730c363cbbdb1405274594d8a3f. parser.c and tree_sitter/*.h are
-// copied unmodified from upstream bindings/go (sha256 1ec8fc0c…a0e81e0a); cgo compiles parser.c with this package.
+// copied unmodified from upstream bindings/go (sha256 1ec8fc0c44c49fd15da2174a4db92824c4be048c074689e8e0b8962a2ab81e0a); cgo compiles parser.c with this package.
 package tree_sitter_vba
 
 // #cgo CFLAGS: -std=c11 -I${SRCDIR}
