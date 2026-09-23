@@ -36,7 +36,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates curl git build-essential ninja-build ccache pkg-config \
-      libopenblas-dev liblapack-dev liblapacke-dev \
+      libopenblas-dev liblapack-dev liblapacke-dev unzip \
     && rm -rf /var/lib/apt/lists/*
 
 # Pinned, checksum-verified toolchains (Go from go.dev, rustup-init from
