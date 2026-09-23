@@ -235,7 +235,7 @@ if [[ "$backend" == cuda ]]; then
 		'find_package(CUDAToolkit REQUIRED)' \
 		"list(APPEND CMAKE_MODULE_PATH \"$prefix/share/cmake/MLX\")" \
 		'find_package(CUDNN REQUIRED)' > "$inc"
-	mlxc_opts+=(-DCMAKE_PROJECT_INCLUDE_BEFORE="$inc")
+	mlxc_opts+=(-DCMAKE_PROJECT_INCLUDE="$inc")
 fi
 cmake -S "$src/mlx-c" -B "$build/mlx-c" "${opts[@]}" ${mlxc_opts[@]+"${mlxc_opts[@]}"} -DMLX_DIR="$prefix/share/cmake/MLX"
 cmake --build "$build/mlx-c" -j "$jobs"
