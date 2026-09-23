@@ -687,12 +687,26 @@ func FuzzReadHeader(f *testing.F) {
 	f.Add(pre(`[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]`))
 	f.Add([]byte{0, 0, 0, 0, 0, 0, 0, 0x80, '{', '}'})
 
+	dir := f.TempDir()
+	lim := Limits{MaxHeaderBytes: 1 << 20, MaxTensors: 64}
 	f.Fuzz(func(t *testing.T, data []byte) {
-		path := filepath.Join(t.TempDir(), "f.safetensors")
-		if err := os.WriteFile(path, data, 0o600); err != nil {
+		tmp, err := os.CreateTemp(dir, "f-*.safetensors")
+		if err != nil {
 			t.Fatal(err)
 		}
-		h, err := ReadHeader(path, Limits{MaxHeaderBytes: 1 << 20, MaxTensors: 64})
+		path := tmp.Name()
+		defer os.Remove(path) //nolint:errcheck
+		if _, err := tmp.Write(data); err != nil {
+			t.Fatal(err)
+		}
+		if err := tmp.Close(); err != nil {
+			t.Fatal(err)
+		}
+		h, err := ReadHeader(path, lim)
+		// The in-memory path must agree with the file path.
+		if _, merr := readHeader(bytes.NewReader(data), int64(len(data)), lim); (merr == nil) != (err == nil) {
+			t.Fatalf("file err %v, memory err %v", err, merr)
+		}
 		if err != nil {
 			if h != nil {
 				t.Fatal("non-nil header with error")
