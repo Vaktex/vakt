@@ -14,5 +14,5 @@ const (
 var (
 	Version = "dev"
 	Commit  = "none"
-	Backend = "unknown" // metal | cuda | cpu
+	Backend = "none" // metal | cuda | cpu | fake | none (no native engine linked)
 )

@@ -8,5 +8,5 @@ import (
 )
 
 func main() {
-	fmt.Fprintf(os.Stderr, "%s (%s) %s\n", brand.Product, brand.Binary, brand.Version)
+	fmt.Fprintf(os.Stderr, "%s (%s) %s backend=%s\n", brand.Product, brand.Binary, brand.Version, brand.Backend)
 }
