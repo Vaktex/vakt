@@ -562,3 +562,45 @@ func TestIgnoreTruncatedLastLineDropped(t *testing.T) {
 		t.Error("truncation not reported")
 	}
 }
+
+// The real walk uses the ignore files the dry pass metered: rewriting a
+// .gitignore between the passes cannot swap in unmetered costly rules.
+func TestIgnoreRewriteBetweenPasses(t *testing.T) {
+	root := t.TempDir()
+	cheap := []byte("*.log\n")
+	var costly strings.Builder
+	for i := 0; i < 9000; i++ {
+		costly.WriteString("*" + strings.Repeat("a", 200) + "b\n")
+	}
+	writeFile(t, root, ".gitignore", cheap)
+	for f := 0; f < 400; f++ {
+		writeFile(t, root, fmt.Sprintf("d/%s%03d.py", strings.Repeat("a", 200), f), []byte("x = 1\n"))
+	}
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Go(func() {
+		p := filepath.Join(root, ".gitignore")
+		for i := 0; ; i++ {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			data := cheap
+			if i%2 == 1 {
+				data = []byte(costly.String())
+			}
+			_ = os.WriteFile(p+".tmp", data, 0o600)
+			_ = os.Rename(p+".tmp", p)
+			time.Sleep(500 * time.Microsecond)
+		}
+	})
+	defer func() { close(stop); wg.Wait() }()
+	for run := 0; run < 10; run++ {
+		start := time.Now()
+		collect(t, context.Background(), root, Options{})
+		if d := time.Since(start); d > 5*time.Second {
+			t.Fatalf("run %d took %v", run, d)
+		}
+	}
+}

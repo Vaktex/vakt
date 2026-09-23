@@ -3,8 +3,12 @@ package ast
 import (
 	"context"
 	"os"
+	"os/exec"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -96,5 +100,59 @@ func TestRebuildValidates(t *testing.T) {
 	units, _ := rebuild(response{Units: []wireUnit{{Unit: core.Unit{Kind: core.KindFunction}, StartByte: 0, EndByte: 1 << 30}}}, "a.py", "Python", src)
 	if len(units) != 1 || units[0].Kind != core.KindFile {
 		t.Fatalf("%+v", units)
+	}
+}
+
+// A worker whose parent dies exits on its own instead of running on as an
+// orphan (the parent can be SIGKILLed mid-scan).
+func TestWorkerExitsWhenOrphaned(t *testing.T) {
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// sh starts the worker in the background with stdin on a FIFO that we
+	// hold open for writing, prints its pid and exits, orphaning it. The
+	// worker never sees EOF, so only the parent watch can make it exit.
+	fifo := filepath.Join(t.TempDir(), "in")
+	if err := syscall.Mkfifo(fifo, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("/bin/sh", "-c", `"$0" < "$1" > /dev/null 2>&1 & echo $!`, exe, fifo)
+	cmd.Env = append(os.Environ(), WorkerEnv+"=1")
+	res := make(chan []byte, 1)
+	go func() { out, _ := cmd.Output(); res <- out }()
+	w, err := os.OpenFile(fifo, os.O_WRONLY, 0) // blocks until the worker opens it
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer w.Close()
+	out := <-res
+	pid, err := strconv.Atoi(strings.TrimSpace(string(out)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if syscall.Kill(pid, 0) != nil {
+			return // gone
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	_ = syscall.Kill(pid, syscall.SIGKILL)
+	t.Fatalf("orphaned worker %d still running", pid)
+}
+
+func TestWorkerEnvAllowlist(t *testing.T) {
+	t.Setenv("HUGGING_FACE_HUB_TOKEN", "x")
+	t.Setenv("HF_TOKEN", "x")
+	t.Setenv("GITHUB_TOKEN", "x")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "x")
+	for _, kv := range workerEnv() {
+		k, _, _ := strings.Cut(kv, "=")
+		switch k {
+		case "PATH", "HOME", "TMPDIR", "LANG", "LC_ALL", "LC_CTYPE", "GODEBUG", "GOMAXPROCS", "GOGC", "GOMEMLIMIT":
+		default:
+			t.Errorf("worker env leaks %s", k)
+		}
 	}
 }
