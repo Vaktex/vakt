@@ -66,7 +66,7 @@ func Extract(ctx context.Context, rel, lang string, src []byte, opts Options) (u
 	// superlinear in time AND memory and does not call the progress
 	// callback while recovering (a 64 KiB Java file of `A<` reached 9 GB).
 	// Such files are not meaningful code: score them as a whole instead.
-	if pathological(src) {
+	if pathological(lang, src) {
 		return []core.Unit{fileUnit(rel, lang, src)}, nil
 	}
 	p, _ := g.pool.Get().(*ts.Parser)
@@ -135,11 +135,19 @@ const (
 )
 
 // pathological reports whether src has bracket structure that would drive
-// tree-sitter's error recovery into superlinear time/memory.
-func pathological(src []byte) bool {
+// tree-sitter's error recovery into superlinear time/memory. Brackets inside
+// comments and string/char literals are not counted: otherwise `A</*>*/`
+// hides every '>' from the count while the parser sees only '<'.
+func pathological(lang string, src []byte) bool {
+	lex := lexerFor(lang)
 	var open [4]int // ( [ { <
 	var worst int
-	for _, c := range src {
+	for i := 0; i < len(src); i++ {
+		c := src[i]
+		if skip := lex.skip(src, i); skip > 0 {
+			i += skip - 1
+			continue
+		}
 		switch c {
 		case '(':
 			open[0]++
@@ -172,15 +180,104 @@ func pathological(src []byte) bool {
 	return false
 }
 
+// lexer knows just enough of a language's comment and literal syntax to
+// skip them. Mistakes only shift what is counted; they never skip real code
+// that is longer than the construct being recognised.
+type lexer struct {
+	line    []string // line-comment starters
+	block   bool     // /* ... */
+	quotes  string   // string delimiters with backslash escapes
+	raw     string   // raw string delimiters without escapes (Go `, JS template)
+	charLit bool     // 'x' char literals (not Rust: 'a is a lifetime)
+}
+
+func lexerFor(lang string) lexer {
+	switch lang {
+	case "C", "C++", "Java", "C#", "Kotlin", "Scala", "Solidity", "Swift":
+		return lexer{line: []string{"//"}, block: true, quotes: `"`, charLit: true}
+	case "Go":
+		return lexer{line: []string{"//"}, block: true, quotes: `"`, raw: "`", charLit: true}
+	case "JavaScript", "TypeScript":
+		return lexer{line: []string{"//"}, block: true, quotes: `"'`, raw: "`"}
+	case "Rust":
+		return lexer{line: []string{"//"}, block: true, quotes: `"`}
+	case "PHP":
+		return lexer{line: []string{"//", "#"}, block: true, quotes: `"'`}
+	case "Python", "Ruby", "Bash", "Terraform", "HCL":
+		return lexer{line: []string{"#"}, quotes: `"'`}
+	case "Lua", "SQL":
+		return lexer{line: []string{"--"}, quotes: `"'`}
+	case "VBA":
+		return lexer{line: []string{"'"}, quotes: `"`}
+	}
+	return lexer{}
+}
+
+// skip returns how many bytes starting at src[i] form a comment or literal
+// (0 if none). Unterminated constructs run to the end of the line (line
+// comments, quoted strings) or of the file (block comments, raw strings),
+// as the parser would treat them.
+func (l lexer) skip(src []byte, i int) int {
+	c := src[i]
+	for _, lc := range l.line {
+		if bytes.HasPrefix(src[i:], []byte(lc)) {
+			if e := bytes.IndexByte(src[i:], '\n'); e >= 0 {
+				return e
+			}
+			return len(src) - i
+		}
+	}
+	if l.block && c == '/' && i+1 < len(src) && src[i+1] == '*' {
+		if e := bytes.Index(src[i+2:], []byte("*/")); e >= 0 {
+			return e + 4
+		}
+		return len(src) - i
+	}
+	if l.raw != "" && strings.IndexByte(l.raw, c) >= 0 {
+		if e := bytes.IndexByte(src[i+1:], c); e >= 0 {
+			return e + 2
+		}
+		return len(src) - i
+	}
+	quote := strings.IndexByte(l.quotes, c) >= 0
+	if !quote && l.charLit && c == '\'' {
+		// 'x' or '\x' only; anything else is not a char literal.
+		if i+2 < len(src) && src[i+1] != '\\' && src[i+2] == '\'' {
+			return 3
+		}
+		if i+3 < len(src) && src[i+1] == '\\' && src[i+3] == '\'' {
+			return 4
+		}
+		return 0
+	}
+	if !quote {
+		return 0
+	}
+	for k := i + 1; k < len(src); k++ {
+		switch src[k] {
+		case '\\':
+			k++
+		case '\n':
+			return k - i // unterminated: ends at the line
+		case c:
+			return k - i + 1
+		}
+	}
+	return len(src) - i
+}
+
 type extractor struct {
-	g       *grammar
-	src     []byte
-	rel     string
-	lang    string
-	units   []core.Unit
-	covered [][2]int // byte ranges claimed by units (for the residual)
-	lines   []int    // byte offset of each line start (built lazily)
-	root    *ts.Node
+	g        *grammar
+	src      []byte
+	rel      string
+	lang     string
+	units    []core.Unit
+	covered  [][2]int // byte ranges claimed by units (for the residual)
+	lines    []int    // byte offset of each line start (built lazily)
+	root     *ts.Node
+	maxEnd   int                // furthest byte covered by an emitted unit
+	anonN    map[uint]int       // countAnon cache per statement start byte
+	callName map[[2]uint]string // callback names per call start byte
 }
 
 // maxErrorUnitLines: a definition containing a parse error that spans more
@@ -291,7 +388,7 @@ func (x *extractor) statementOf(fn *ts.Node) *ts.Node {
 	for p := fn.Parent(); p != nil; p = p.Parent() {
 		switch p.Kind() {
 		case "expression_statement":
-			if x.countAnon(p, 0) == 1 {
+			if x.anonInStatement(p) == 1 {
 				return p
 			}
 			return fn // several callbacks: each is its own unit
@@ -302,6 +399,21 @@ func (x *extractor) statementOf(fn *ts.Node) *ts.Node {
 		break
 	}
 	return fn
+}
+
+// anonInStatement is countAnon for a statement, computed once per statement
+// (a call with N callbacks would otherwise rescan it N times).
+func (x *extractor) anonInStatement(st *ts.Node) int {
+	if x.anonN == nil {
+		x.anonN = map[uint]int{}
+	}
+	k := st.StartByte()
+	if c, ok := x.anonN[k]; ok {
+		return c
+	}
+	c := x.countAnon(st, 0)
+	x.anonN[k] = c
+	return c
 }
 
 // countAnon counts substantial anonymous functions directly in n (not
@@ -327,14 +439,10 @@ func (x *extractor) countAnon(n *ts.Node, depth int) int {
 }
 
 // coveredSpan reports whether span overlaps a unit already emitted.
+// Units are emitted in document order, so a span overlaps an earlier unit
+// iff it starts before the furthest end emitted so far (O(1), not O(units)).
 func (x *extractor) coveredSpan(n *ts.Node) bool {
-	sb, eb := int(n.StartByte()), int(n.EndByte()) // #nosec G115 -- byte offsets within src
-	for _, r := range x.covered {
-		if sb < r[1] && r[0] < eb {
-			return true
-		}
-	}
-	return false
+	return int(n.StartByte()) < x.maxEnd // #nosec G115 -- byte offset within src
 }
 
 // hasBody reports whether a class-like node has a body (C/C++ `struct X;`
@@ -405,22 +513,15 @@ func (x *extractor) anonName(fn *ts.Node) string {
 				return x.text(k)
 			}
 		case "call_expression":
-			if f := p.ChildByFieldName("function"); f != nil {
-				callee := x.text(f)
-				if f.Kind() == "member_expression" {
-					if pr := f.ChildByFieldName("property"); pr != nil && strings.ContainsAny(callee, "\n(") {
-						callee = x.text(pr) // chained call: name by the method (then, catch, ...)
-					}
-				}
-				if a := p.ChildByFieldName("arguments"); a != nil {
-					for _, c := range children(a, true) {
-						if c.Kind() == "string" || c.Kind() == "template_string" {
-							return callee + " " + x.text(c)
-						}
-					}
-				}
-				return callee + " callback"
+			if nm, ok := x.callName[[2]uint{p.StartByte(), p.EndByte()}]; ok {
+				return nm
 			}
+			nm := x.callNameOf(p)
+			if x.callName == nil {
+				x.callName = map[[2]uint]string{}
+			}
+			x.callName[[2]uint{p.StartByte(), p.EndByte()}] = nm
+			return nm
 		case "export_statement":
 			if strings.Contains(x.text(p), "default") {
 				return "default"
@@ -551,6 +652,7 @@ func (x *extractor) emitNamed(span *ts.Node, name, class, kind string) {
 	// leadingComments already starts at a line boundary, so indentation is
 	// preserved.
 	x.covered = append(x.covered, [2]int{sb, eb})
+	x.maxEnd = max(x.maxEnd, eb)
 	x.units = append(x.units, core.Unit{
 		File:      x.rel,
 		Language:  x.lang,
@@ -920,4 +1022,36 @@ func goReceiverType(x *extractor, recv *ts.Node) string {
 		return ""
 	}
 	return find(recv)
+}
+
+// callNameOf names callbacks passed to call p: the callee, plus the first
+// string argument (a route) when present.
+func (x *extractor) callNameOf(p *ts.Node) string {
+	f := p.ChildByFieldName("function")
+	if f == nil {
+		return "<anonymous>"
+	}
+	callee := x.text(f)
+	if f.Kind() == "member_expression" {
+		if pr := f.ChildByFieldName("property"); pr != nil && strings.ContainsAny(callee, "\n(") {
+			callee = x.text(pr) // chained call: name by the method (then, catch, ...)
+		}
+	}
+	if a := p.ChildByFieldName("arguments"); a != nil {
+		// Only the first few arguments: a route string comes first.
+		c := a.Walk()
+		defer c.Close()
+		if c.GotoFirstChild() {
+			for k := 0; k < 4; k++ {
+				n := c.Node()
+				if n.Kind() == "string" || n.Kind() == "template_string" {
+					return callee + " " + x.text(n)
+				}
+				if !c.GotoNextSibling() {
+					break
+				}
+			}
+		}
+	}
+	return callee + " callback"
 }

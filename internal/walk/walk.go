@@ -64,6 +64,10 @@ const (
 	ReasonIgnored    = "ignored by the repository's ignore files"
 	ReasonTooDeep    = "directory nesting too deep"
 	ReasonIgnoreCap  = "ignore file truncated (too many patterns)"
+	// ReasonIgnoreOff is reported once (on ".") when the tree's ignore files
+	// are too large or costly to honour: they are then disregarded for the
+	// rest of the walk, so more files are scanned, never fewer.
+	ReasonIgnoreOff = "repository ignore files disregarded (too large or too costly to evaluate)"
 )
 
 // maxDepth bounds directory nesting (a directory swapped for an in-root
@@ -140,6 +144,8 @@ type walker struct {
 	mu      sync.Mutex
 	visited map[string]bool // real dirs already walked (FollowSymlinks only)
 	budget  atomic.Int64    // ignore patterns still allowed in this walk
+	meter   matchMeter      // ignore matching work still allowed in this walk
+	offOnce sync.Once
 }
 
 // Walk walks root and sends every scannable file on out and every skipped
@@ -189,6 +195,7 @@ func Walk(ctx context.Context, root string, opts Options, out chan<- File, skipp
 		visited: map[string]bool{real: true},
 	}
 	w.budget.Store(maxPatternsPerWalk)
+	w.meter.left.Store(maxMatchSteps)
 	var chain *ignoreChain
 	if !opts.NoRepoIgnores {
 		// Only a real .git directory: a .git symlink could point at another
@@ -262,7 +269,7 @@ func (w *walker) dir(path, rel, name string, chain *ignoreChain, depth int) {
 	if w.excluded(rel) {
 		return
 	}
-	if chain.ignored(rel, true) {
+	if w.ignored(chain, rel, true) {
 		w.skip(rel, ReasonIgnored)
 		return
 	}
@@ -299,7 +306,7 @@ func (w *walker) symlink(path, rel string, chain *ignoreChain, depth int) {
 	if w.excluded(rel) {
 		return
 	}
-	if chain.ignored(rel, isDir) {
+	if w.ignored(chain, rel, isDir) {
 		w.skip(rel, ReasonIgnored)
 		return
 	}
@@ -366,7 +373,7 @@ func (w *walker) file(path, rel string, typ fs.FileMode, chain *ignoreChain) {
 	if w.excluded(rel) || !w.included(rel) {
 		return
 	}
-	if chain.ignored(rel, false) {
+	if w.ignored(chain, rel, false) {
 		w.skip(rel, ReasonIgnored)
 		return
 	}
@@ -528,5 +535,29 @@ func (w *walker) readIgnore(path, base string) *ignoreFile {
 	if truncated {
 		w.skip(path, ReasonIgnoreCap)
 	}
+	if w.budget.Load() < 0 {
+		// The walk-wide pattern budget ran out. Which files got patterns
+		// would depend on goroutine timing, so stop honouring all of them.
+		w.meter.out.Store(true)
+	}
 	return ig
+}
+
+// ignored applies the repository's ignore rules under the walk's work
+// budget, reporting once when they are switched off.
+func (w *walker) ignored(chain *ignoreChain, rel string, isDir bool) bool {
+	if w.meter.out.Load() {
+		w.ignoresOff()
+		return false
+	}
+	ig := chain.ignoredMetered(rel, isDir, &w.meter)
+	if w.meter.out.Load() {
+		w.ignoresOff()
+		return false
+	}
+	return ig
+}
+
+func (w *walker) ignoresOff() {
+	w.offOnce.Do(func() { w.skip(".", ReasonIgnoreOff) })
 }

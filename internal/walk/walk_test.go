@@ -428,3 +428,36 @@ func TestSwapRaceCannotEscape(t *testing.T) {
 	close(stop)
 	wg.Wait()
 }
+
+// F2 regression: costly ignore files are switched off (once, reported),
+// bounding total matching work; files are scanned rather than hidden.
+func TestIgnoreWorkBudget(t *testing.T) {
+	root := t.TempDir()
+	var b strings.Builder
+	for i := 0; i < 4000; i++ {
+		b.WriteString("*" + strings.Repeat("a", 250) + "b\n")
+	}
+	dir := ""
+	for d := 0; d < 25; d++ {
+		dir = filepath.Join(dir, "d")
+		writeFile(t, root, filepath.Join(dir, ".gitignore"), []byte(b.String()))
+	}
+	for f := 0; f < 60; f++ {
+		writeFile(t, root, filepath.Join(dir, strings.Repeat("a", 245)+string(rune('A'+f%26))+string(rune('a'+f/26))+".py"), []byte("x = 1\n"))
+	}
+	start := time.Now()
+	r := collect(t, context.Background(), root, Options{})
+	if d := time.Since(start); d > 20*time.Second {
+		t.Fatalf("took %v", d)
+	}
+	py := 0
+	for rel := range r.files {
+		if strings.HasSuffix(rel, ".py") {
+			py++
+		}
+	}
+	if py != 60 {
+		t.Fatalf("py files %d", py)
+	}
+	t.Logf("took %v, skip on '.': %q", time.Since(start), r.skips["."])
+}

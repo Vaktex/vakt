@@ -34,7 +34,12 @@ const (
 	maxPatternsPerFile    = 10_000
 	maxSegmentsPerPattern = 64
 	maxPatternsPerWalk    = 100_000
-	maxPatternRunes       = 4096
+	maxPatternRunes       = 256
+	// maxMatchSteps bounds the total wildcard-matching work of one walk
+	// (roughly pattern runes x name runes summed over lookups). Real trees
+	// use a tiny fraction; a hostile tree that exhausts it just stops
+	// having its ignore files honoured, which scans more, never less.
+	maxMatchSteps = 2_000_000_000
 )
 
 type ignorePattern struct {
@@ -81,6 +86,7 @@ func (g *seg) match(name string, nameR []rune) bool {
 type ignoreFile struct {
 	base string
 	pats []ignorePattern
+	cost int // sum of pattern rune lengths (matching work per name rune)
 }
 
 // ignoreChain is an immutable linked list of ignore files, deepest first.
@@ -99,6 +105,34 @@ func (c *ignoreChain) push(f *ignoreFile) *ignoreChain {
 // ignored reports whether full (a slash path relative to the repository
 // root) is ignored.
 func (c *ignoreChain) ignored(full string, isDir bool) bool {
+	return c.ignoredMetered(full, isDir, nil)
+}
+
+// matchMeter counts matching work across a walk. Once exhausted, every
+// lookup reports "not ignored".
+type matchMeter struct {
+	left atomic.Int64
+	out  atomic.Bool
+}
+
+func (m *matchMeter) spend(n int) bool {
+	if m == nil {
+		return true
+	}
+	if m.out.Load() {
+		return false
+	}
+	if m.left.Add(int64(-n)) < 0 {
+		m.out.Store(true)
+		return false
+	}
+	return true
+}
+
+func (c *ignoreChain) ignoredMetered(full string, isDir bool, m *matchMeter) bool {
+	if m != nil && m.out.Load() {
+		return false
+	}
 	base := full
 	if i := strings.LastIndexByte(full, '/'); i >= 0 {
 		base = full[i+1:]
@@ -110,6 +144,10 @@ func (c *ignoreChain) ignored(full string, isDir bool) bool {
 			continue
 		}
 		pats := n.file.pats
+		// Charge this file's worst-case matching cost up front.
+		if !m.spend(n.file.cost * (len(baseR) + 1)) {
+			return false
+		}
 		for i := len(pats) - 1; i >= 0; i-- {
 			if pats[i].match(p, base, baseR, isDir) {
 				return !pats[i].negate
@@ -215,6 +253,9 @@ func parseIgnore(base string, data []byte, budget *atomic.Int64) (f *ignoreFile,
 			return f, true
 		}
 		f.pats = append(f.pats, p)
+		for _, sg := range p.segs {
+			f.cost += len(sg.runes) + 1
+		}
 	}
 	return f, truncated
 }
