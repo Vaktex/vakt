@@ -84,9 +84,16 @@ PKG      := ./cmd/vakt
 NATIVE_PKGS = $(shell for d in ./internal/engine ./internal/pipeline; do [ -d "$$d" ] && echo "$$d/..."; done)
 
 # Keep build-machine paths out of native objects (C/C++ __FILE__, Rust panics).
-export CGO_CFLAGS   := $(CGO_CFLAGS) -ffile-prefix-map=$(CURDIR)=.
-export CGO_CXXFLAGS := $(CGO_CXXFLAGS) -ffile-prefix-map=$(CURDIR)=.
-export RUSTFLAGS    := $(RUSTFLAGS) --remap-path-prefix=$(CURDIR)=. --remap-path-prefix=$(HOME)=~
+# CFLAGS/CXXFLAGS reach the MLX cmake build in third_party/mlx/build.sh.
+PREFIX_MAP := -ffile-prefix-map=$(CURDIR)=.
+export CGO_CFLAGS   := $(CGO_CFLAGS) $(PREFIX_MAP)
+export CGO_CXXFLAGS := $(CGO_CXXFLAGS) $(PREFIX_MAP)
+export CFLAGS       := $(CFLAGS) $(PREFIX_MAP)
+export CXXFLAGS     := $(CXXFLAGS) $(PREFIX_MAP)
+CARGO_HOME ?= $(HOME)/.cargo
+export RUSTFLAGS    := $(RUSTFLAGS) --remap-path-prefix=$(CURDIR)=. \
+	--remap-path-prefix=$(CARGO_HOME)/registry/src=crates --remap-path-prefix=$(CARGO_HOME)/git/checkouts=crates-git \
+	--remap-path-prefix=$(HOME)=~
 
 .PHONY: help deps deps-mlx deps-tokenizers dev prod sign test parity bench lint audit checksums clean print-%
 
@@ -159,7 +166,9 @@ audit: ## Release hygiene checks on dist/$(ASSET)
 
 checksums: ## Write dist/SHA256SUMS (release assets + install.sh)
 	@if [ -f install.sh ]; then cp install.sh $(DIST_DIR)/install.sh; fi
-	cd $(DIST_DIR) && files=$$(ls vakt-* install.sh 2>/dev/null | grep -v -- '-fake$$') && \
+	cd $(DIST_DIR) && files=$$(ls vakt-* 2>/dev/null | grep -v -- '-fake$$' || true) && \
+		if [ -z "$$files" ]; then echo 'checksums: no release assets in dist/ (fake builds are excluded)'; exit 1; fi && \
+		files="$$files $$( [ -f install.sh ] && echo install.sh )" && \
 		{ if command -v sha256sum >/dev/null; then sha256sum $$files; else shasum -a 256 $$files; fi; } > SHA256SUMS
 	@cat $(DIST_DIR)/SHA256SUMS
 

@@ -36,7 +36,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Pinned, checksum-verified toolchains (Go from go.dev, rustup-init from
-# static.rust-lang.org) so the release build is reproducible.
+# static.rust-lang.org). Binaries are still not bit-reproducible: garble uses
+# a random seed per build (see docs/BUILD.md).
 RUN set -eu; arch="$(dpkg --print-architecture)"; \
     case "$arch" in \
       amd64) go_sum="$GO_SHA256_amd64"; rs_sum="$RUSTUP_SHA256_amd64"; triple=x86_64-unknown-linux-gnu ;; \

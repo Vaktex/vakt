@@ -34,7 +34,7 @@ leaks=$(strings -a "$bin" | grep -oE \
 	-e '/Users/[A-Za-z][^ ]{0,40}' \
 	-e '/home/[A-Za-z][^ ]{0,40}' \
 	-e '/root/[^ ]{0,40}' \
-	-e '\.cargo/registry[^ ]{0,40}' \
+	-e '/\.cargo/(registry|git)[^ ]{0,40}' \
 	-e '/src/third_party[^ ]{0,40}' \
 	-e 'vakt/(internal|cmd)/[^ ]{0,40}' \
 	-e 'internal/(engine|pipeline|hub|tokenize|ast|walk|report|brand|core|labels)/[^ ]{0,20}' \
@@ -70,13 +70,17 @@ if out=$("$bin" version 2>&1) && [ -n "$out" ]; then
 		bad "version output has no 'version=… commit=… backend=…' stamp: $(printf '%s' "$out" | head -n 1)"
 	else
 		v=$(printf '%s' "$stamp" | sed 's/.*version=\([^ ]*\).*/\1/')
+		c=$(printf '%s' "$stamp" | sed 's/.*commit=\([^ ]*\).*/\1/')
 		b=$(printf '%s' "$stamp" | sed 's/.*backend=\([^ ]*\).*/\1/')
-		case $v in dev|unknown|"") bad "version not stamped ($stamp)" ;; esac
-		case $b in none|unknown|"") bad "backend not stamped ($stamp)" ;; esac
-		if [ -n "${EXPECT_VERSION:-}" ] && [ "$v" != "$EXPECT_VERSION" ]; then bad "version $v != expected $EXPECT_VERSION"; fi
-		if [ -n "${EXPECT_BACKEND:-}" ] && [ "$b" != "$EXPECT_BACKEND" ]; then bad "backend $b != expected $EXPECT_BACKEND"; fi
-		if [ "$b" = fake ] && [ "${EXPECT_BACKEND:-}" != fake ]; then bad "fake-engine binary"; fi
-		[ "$fail" -eq 0 ] && pass "stamp: $stamp"
+		stamp_ok=1
+		sbad() { bad "$1"; stamp_ok=0; }
+		case $v in dev|none|unknown|"") sbad "version not stamped ($stamp)" ;; esac
+		case $c in none|unknown|"") sbad "commit not stamped ($stamp)" ;; esac
+		case $b in dev|none|unknown|"") sbad "backend not stamped ($stamp)" ;; esac
+		if [ -n "${EXPECT_VERSION:-}" ] && [ "$v" != "$EXPECT_VERSION" ]; then sbad "version $v != expected $EXPECT_VERSION"; fi
+		if [ -n "${EXPECT_BACKEND:-}" ] && [ "$b" != "$EXPECT_BACKEND" ]; then sbad "backend $b != expected $EXPECT_BACKEND"; fi
+		if [ "$b" = fake ] && [ "${EXPECT_BACKEND:-}" != fake ]; then sbad "fake-engine binary"; fi
+		[ "$stamp_ok" -eq 1 ] && pass "stamp: $stamp"
 	fi
 else
 	skip "version check (binary did not run on this host)"

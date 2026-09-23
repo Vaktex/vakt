@@ -3,6 +3,8 @@
 bin
 dist
 testdata/models
+# Native build outputs are host-specific; the container rebuilds them for
+# linux (a macOS libtokenizers.a or libmlx.a would not link there).
 third_party/src
 third_party/*/build
 third_party/*/install
