@@ -26,7 +26,7 @@ const (
 	defaultThreshold    = 0.5
 	defaultTop          = 25
 	defaultMinTokens    = 16
-	defaultBatchTokens  = 32768
+	defaultBatchTokens  = 4096
 	defaultMaxFileBytes = 2 << 20
 	defaultOut          = brand.Binary + "-report.json"
 	defaultModel        = "hf:" + brand.ModelRepo + "@main"
@@ -58,11 +58,12 @@ type ScanOptions struct {
 	Include, Exclude []string
 	MaxFileBytes     int64
 	FollowSymlinks   bool
+	NoRepoIgnores    bool
 
 	// Model. Exactly one of ModelPath or ModelRepo is set.
 	Model         string // the raw --model value
 	ModelPath     string // a local model.safetensors
-	ModelRepo     string // Hugging Face repo id, e.g. vaktex/DOM-0.8B
+	ModelRepo     string // Hugging Face repo id, e.g. vaktex/dom-0.8b
 	ModelRevision string // branch, tag or commit (default "main")
 	Precision     string // "fp32" or "bf16"
 	Device        string // "auto", "gpu" or "cpu"
@@ -120,11 +121,12 @@ func newPatrolCmd() *cobra.Command {
 	f.BoolVar(&o.NoCache, "no-cache", false, "don't read or write the score cache")
 	f.StringVar(&o.Model, "model", defaultModel, "a local model.safetensors path, or hf:owner/name[@revision]")
 	f.StringVar(&o.ModelRevision, "revision", "", "model revision (overrides @revision in --model)")
-	f.StringVar(&o.Precision, "precision", "fp32", "compute precision: fp32 or bf16")
+	f.StringVar(&o.Precision, "precision", "fp32", "compute precision: fp32 (exact), tf32 (~1.7x faster on GPU) or bf16 (~2x faster)")
 	f.StringVar(&o.Device, "device", "auto", "device: auto, gpu or cpu")
 	f.StringVar(&devices, "devices", "", "comma-separated GPU indices to use (e.g. 0,1)")
 	f.Int64Var(&o.MaxFileBytes, "max-file-bytes", defaultMaxFileBytes, "skip files larger than this")
 	f.BoolVar(&o.FollowSymlinks, "follow-symlinks", false, "follow symlinks (never outside the scan root)")
+	f.BoolVar(&o.NoRepoIgnores, "no-repo-ignores", false, "ignore the scanned tree's .gitignore/.vaktignore (for untrusted code: the tree cannot hide files)")
 	f.BoolVarP(&o.Quiet, "quiet", "q", false, "print only the summary line")
 	f.BoolVar(&o.NoColor, "no-color", false, "disable colour (also NO_COLOR)")
 	f.Float64Var(&o.FailOn, "fail-on", 0, "exit with status 2 if any unit scores >= this")
@@ -167,9 +169,9 @@ func (o *ScanOptions) finish(devices string, outSet, revisionSet bool) error {
 		return errors.New("--max-file-bytes must be positive")
 	}
 	switch o.Precision {
-	case "fp32", "bf16":
+	case "fp32", "tf32", "bf16":
 	default:
-		return fmt.Errorf("--precision must be fp32 or bf16 (got %q)", o.Precision)
+		return fmt.Errorf("--precision must be fp32, tf32 or bf16 (got %q)", o.Precision)
 	}
 	switch o.Device {
 	case "auto", "gpu", "cpu":
