@@ -62,7 +62,11 @@ func Run(ctx context.Context, cfg Config, engines []core.Engine, tok core.Tokeni
 		budget = bs.MaxBatchTokens()
 	}
 	if budget <= 0 {
-		budget = 32768
+		budget = 4096 // measured: small padded batches beat large ones (less padding, less memory pressure)
+	}
+	maxSeqs := 256
+	if bs, ok := engines[0].(interface{ MaxBatchSeqs() int }); ok && bs.MaxBatchSeqs() > 0 {
+		maxSeqs = bs.MaxBatchSeqs()
 	}
 
 	var cache *Cache
@@ -91,18 +95,31 @@ func Run(ctx context.Context, cfg Config, engines []core.Engine, tok core.Tokeni
 		skipsMu.Unlock()
 	}
 
+	// Every goroutine started below is tracked: Run must not return while
+	// any of them can still touch tok or the engines (the caller closes
+	// them right after).
+	var all sync.WaitGroup
+	defer all.Wait()
+	defer cancel(nil) // runs first: unblocks everything, then all.Wait
+
 	// 1. Walk.
 	var walkErr error
 	var nFiles atomic.Int64
 	var wgSkip sync.WaitGroup
 	wgSkip.Add(1)
+	all.Add(1)
 	go func() {
+		defer all.Done()
 		defer wgSkip.Done()
 		for s := range skipsC {
 			addSkip(s.Rel, s.Reason)
 		}
 	}()
+	walkDone := make(chan struct{})
+	all.Add(1)
 	go func() {
+		defer all.Done()
+		defer close(walkDone)
 		defer close(files)
 		walkErr = walk.Walk(ctx, cfg.Root, cfg.Walk, files, skipsC)
 	}()
@@ -111,7 +128,9 @@ func Run(ctx context.Context, cfg Config, engines []core.Engine, tok core.Tokeni
 	var wgParse sync.WaitGroup
 	for range cfg.Jobs {
 		wgParse.Add(1)
+		all.Add(1)
 		go func() {
+			defer all.Done()
 			defer wgParse.Done()
 			for f := range files {
 				prog.FilesFound.Add(1)
@@ -145,13 +164,22 @@ func Run(ctx context.Context, cfg Config, engines []core.Engine, tok core.Tokeni
 			}
 		}()
 	}
-	go func() { wgParse.Wait(); close(skipsC); close(units) }()
+	all.Add(1)
+	go func() {
+		defer all.Done()
+		wgParse.Wait()
+		<-walkDone // walk may still send skips until it returns
+		close(skipsC)
+		close(units)
+	}()
 
 	// 3. Tokenize (render, split oversize, encode, truncate).
 	var wgTok sync.WaitGroup
 	for range cfg.Jobs {
 		wgTok.Add(1)
+		all.Add(1)
 		go func() {
+			defer all.Done()
 			defer wgTok.Done()
 			for u := range units {
 				for _, e := range encodeUnit(u, tok) {
@@ -168,14 +196,17 @@ func Run(ctx context.Context, cfg Config, engines []core.Engine, tok core.Tokeni
 			}
 		}()
 	}
-	go func() { wgTok.Wait(); close(encoded) }()
+	all.Add(1)
+	go func() { defer all.Done(); wgTok.Wait(); close(encoded) }()
 
 	// 4. Cache lookup + batching + scoring.
 	modelKey := info.ModelSHA
 	scoreErr := make(chan error, len(engines))
+	all.Add(1)
 	go func() {
+		defer all.Done()
 		defer close(results)
-		b := newBatcher(budget)
+		b := newBatcher(budget, maxSeqs)
 		work := make(chan []core.Encoded, len(engines))
 		var wgEng sync.WaitGroup
 		for _, eng := range engines {
@@ -234,9 +265,12 @@ func Run(ctx context.Context, cfg Config, engines []core.Engine, tok core.Tokeni
 			return true
 		}
 		for e := range encoded {
+			if ctx.Err() != nil {
+				continue // drain so the tokenizers can exit
+			}
 			pending = append(pending, e)
-			if len(pending) == cap(pending) && !flushCache() {
-				break
+			if len(pending) == cap(pending) {
+				flushCache()
 			}
 		}
 		if ctx.Err() == nil && flushCache() {
@@ -246,12 +280,12 @@ func Run(ctx context.Context, cfg Config, engines []core.Engine, tok core.Tokeni
 		wgEng.Wait()
 	}()
 
-	// 5. Collect.
+	// 5. Collect (always drain so every stage can finish).
 	var out []report.Result
 	for r := range results {
 		out = append(out, r)
 	}
-	wgSkip.Wait()
+	all.Wait()
 	select {
 	case err := <-scoreErr:
 		return nil, err

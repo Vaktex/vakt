@@ -11,6 +11,7 @@ import (
 // two) so sequences in one batch have similar lengths and little padding.
 type batcher struct {
 	budget  int
+	maxSeqs int
 	buckets map[int][]core.Encoded
 	held    int // total held units
 }
@@ -21,8 +22,8 @@ const holdLimit = 4096
 
 // A single sequence is always allowed even if it alone exceeds the budget
 // (the engine accepts one MaxTokens sequence); take() guarantees >= 1.
-func newBatcher(budget int) *batcher {
-	return &batcher{budget: max(budget, 1), buckets: map[int][]core.Encoded{}}
+func newBatcher(budget, maxSeqs int) *batcher {
+	return &batcher{budget: max(budget, 1), maxSeqs: max(maxSeqs, 1), buckets: map[int][]core.Encoded{}}
 }
 
 func bucketOf(n int) int {
@@ -40,7 +41,7 @@ func (b *batcher) add(e core.Encoded) [][]core.Encoded {
 	b.held++
 	var out [][]core.Encoded
 	// A bucket is full when its units at the bucket's length fill the budget.
-	if per := b.budget / k; len(b.buckets[k]) >= max(per, 1) {
+	if per := min(b.budget/k, b.maxSeqs); len(b.buckets[k]) >= max(per, 1) {
 		out = append(out, b.take(k))
 	}
 	if b.held > holdLimit {
@@ -72,7 +73,7 @@ func (b *batcher) take(k int) []core.Encoded {
 	// Longest first so the padded width is known up front.
 	sort.Slice(q, func(i, j int) bool { return len(q[i].IDs) > len(q[j].IDs) })
 	width := len(q[0].IDs)
-	n := max(1, min(len(q), b.budget/max(width, 1)))
+	n := max(1, min(len(q), b.budget/max(width, 1), b.maxSeqs))
 	batch := append([]core.Encoded(nil), q[:n]...)
 	b.buckets[k] = q[n:]
 	if len(b.buckets[k]) == 0 {

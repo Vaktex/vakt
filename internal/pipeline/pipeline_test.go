@@ -247,7 +247,7 @@ func TestCacheRejectsCorruptEntries(t *testing.T) {
 }
 
 func TestBatcher(t *testing.T) {
-	b := newBatcher(core.MaxTokens)
+	b := newBatcher(core.MaxTokens, 256)
 	var all [][]core.Encoded
 	for i := 1; i <= 500; i++ {
 		all = append(all, b.add(core.Encoded{IDs: make([]int32, 1+(i*37)%3000)})...)
@@ -259,7 +259,7 @@ func TestBatcher(t *testing.T) {
 		for _, e := range bt {
 			longest = max(longest, len(e.IDs))
 		}
-		if longest*len(bt) > core.MaxTokens {
+		if longest*len(bt) > core.MaxTokens || len(bt) > 256 {
 			t.Fatalf("batch %d x %d over budget", len(bt), longest)
 		}
 		n += len(bt)
