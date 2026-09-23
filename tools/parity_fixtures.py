@@ -28,8 +28,53 @@ from safetensors.torch import load_file, save_file  # noqa: E402
 
 from _common import MOCK_FP32, PARITY_DIR, build_classifier, sha256_file  # noqa: E402
 
-LLAMA_SRC = Path("/Users/shearer/vaktex/llama.cpp/src")
-JUICE_SHOP = Path("/Users/shearer/vaktex/juice-shop")
+import os  # noqa: E402
+import subprocess  # noqa: E402
+
+from _common import CLASSIFICATION_MODELS  # noqa: E402
+
+
+class PinnedRepo:
+    """Read files from a git repository at a pinned commit.
+
+    Reading through `git show <sha>:<path>` rather than the working tree makes
+    fixtures reproducible from upstream and keeps uncommitted local edits out
+    of committed test data.
+    """
+
+    def __init__(self, name: str, root: Path, sha: str, subdir: str = ""):
+        self.name, self.root, self.sha, self.subdir = name, root, sha, subdir.strip("/")
+
+    def _path(self, rel: str) -> str:
+        return f"{self.subdir}/{rel}" if self.subdir else rel
+
+    def read_text(self, rel: str) -> str:
+        blob = subprocess.run(
+            ["git", "-C", str(self.root), "show", f"{self.sha}:{self._path(rel)}"],
+            check=True, capture_output=True,
+        ).stdout
+        return blob.decode("utf-8", errors="strict")
+
+    def glob(self, rel_dir: str, suffix: str) -> list[str]:
+        out = subprocess.run(
+            ["git", "-C", str(self.root), "ls-tree", "--name-only", f"{self.sha}:{self._path(rel_dir)}"],
+            check=True, capture_output=True, text=True,
+        ).stdout.split()
+        return sorted(f"{rel_dir.rstrip('/')}/{n}" for n in out if n.endswith(suffix))
+
+    def describe(self) -> dict:
+        return dict(name=self.name, sha=self.sha)
+
+
+_VAKTEX = CLASSIFICATION_MODELS.parent
+LLAMA = PinnedRepo(
+    "llama.cpp", Path(os.environ.get("VAKT_LLAMA_CPP", _VAKTEX / "llama.cpp")),
+    os.environ.get("VAKT_LLAMA_CPP_SHA", "3173a56471c1753650cd806694145ffd6dcace67"), subdir="src",
+)
+JUICE = PinnedRepo(
+    "juice-shop", Path(os.environ.get("VAKT_JUICE_SHOP", _VAKTEX / "juice-shop")),
+    os.environ.get("VAKT_JUICE_SHOP_SHA", "a520e158cb65c43d24e2c55d84f09b05a2511a03"),
+)
 
 # ----------------------------------------------------------------------------
 # Samples
@@ -88,9 +133,9 @@ SAMPLES = [
 LONG_TARGETS = [("long_2k", 2_000), ("long_8k", 8_000), ("long_12k", 12_000)]
 
 LONG_SOURCES = [
-    ("C++", [LLAMA_SRC / "llama-vocab.cpp", LLAMA_SRC / "llama-model.cpp"]),
-    ("TypeScript", sorted((JUICE_SHOP / "routes").glob("*.ts"))),
-    ("C++", [LLAMA_SRC / "llama-context.cpp", LLAMA_SRC / "llama-model.cpp"]),
+    ("C++", [(LLAMA, "llama-vocab.cpp"), (LLAMA, "llama-model.cpp")]),
+    ("TypeScript", None),  # juice-shop routes/*.ts, resolved lazily from the pinned tree
+    ("C++", [(LLAMA, "llama-context.cpp"), (LLAMA, "llama-model.cpp")]),
 ]
 
 BATCH_NAMES = ["py_os_system", "c_gets", "empty", "java_sql"]
@@ -102,10 +147,13 @@ def long_code(tokenizer, language, files, target_tokens):
     """Real code, cut at a line boundary so the rendered prompt has ~target tokens."""
     from experiment.encoding import PROMPT
 
+    if files is None:
+        files = [(JUICE, rel) for rel in JUICE.glob("routes", ".ts")]
+
     text = ""
 
-    for path in files * 8:
-        text += path.read_text(encoding="utf-8", errors="strict")
+    for repo, rel in files * 8:
+        text += repo.read_text(rel)
         if len(text) > target_tokens * 6:
             break
 
@@ -288,12 +336,15 @@ def tokenizer_texts(samples):
 
     # Slices of real files at varied offsets.
     for path, starts in [
-        (LLAMA_SRC / "llama-vocab.cpp", [0, 5000, 40000]),
-        (LLAMA_SRC / "llama-model.cpp", [1000, 60000]),
-        (JUICE_SHOP / "routes" / "chat.ts", [0, 3000]),
-        (JUICE_SHOP / "lib" / "insecurity.ts", [0, 2500]),
+        ((LLAMA, "llama-vocab.cpp"), [0, 5000, 40000]),
+        ((LLAMA, "llama-model.cpp"), [1000, 60000]),
+        ((JUICE, "routes/chat.ts"), [0, 3000]),
+        # lib/insecurity.ts opens with juice-shop's public demo RSA key; start
+        # past it so secret scanners don't flag committed fixtures.
+        ((JUICE, "lib/insecurity.ts"), [4000, 6500]),
     ]:
-        content = path.read_text(encoding="utf-8")
+        repo, rel = path
+        content = repo.read_text(rel)
 
         for start in starts:
             texts.append(content[start:start + 1500])
@@ -417,6 +468,7 @@ def main():
         pad_token_id=tokenizer.pad_token_id,
         eos_token_id=tokenizer.eos_token_id,
         families_order=list(CWE_FAMILY_NAMES),
+        sources=[LLAMA.describe(), JUICE.describe()],
         samples=list(by_name.values()),
         batch=batch,
     )
@@ -443,8 +495,9 @@ def main():
     tokenizer_path = args.out_dir / "tokenizer_cases.json"
     tokenizer_path.write_text(
         json.dumps(
-            dict(tokenizer=str(Path(config.model_path) / "tokenizer.json"),
+            dict(tokenizer="Qwen3.5-0.8B-Base/tokenizer.json",
                  tokenizer_sha256=sha256_file(Path(config.model_path) / "tokenizer.json"),
+                 sources=[LLAMA.describe(), JUICE.describe()],
                  transformers_version=fixtures["transformers_version"],
                  cases=cases),
             ensure_ascii=False,

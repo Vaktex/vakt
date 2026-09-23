@@ -2,7 +2,7 @@
 
 These Python scripts produce the ground truth that the Go engine (`vakt`) is
 tested against. They import the training package
-(`/Users/shearer/vaktex/classification_models/experiment`) directly, so the
+(`$VAKT_CLASSIFICATION_MODELS/experiment`) directly, so the
 tensor layout, prompt, tokenisation, pooling and heads are exactly what
 training and `experiment.publish` produce. They are not reimplemented here.
 
@@ -11,13 +11,20 @@ worktrees all use that one directory.
 
 | Env var | Default |
 |---|---|
-| `VAKT_CLASSIFICATION_MODELS` | `/Users/shearer/vaktex/classification_models` (holds `experiment/` and `Qwen3.5-0.8B-Base/`) |
+| `VAKT_CLASSIFICATION_MODELS` | the nearest parent dir holding `experiment/` and `Qwen3.5-0.8B-Base/` |
 | `VAKT_TESTDATA` | `$VAKT_CLASSIFICATION_MODELS/Harness/testdata` |
+| `VAKT_LLAMA_CPP`, `VAKT_LLAMA_CPP_SHA` | `../llama.cpp` next to classification_models, commit `3173a564` |
+| `VAKT_JUICE_SHOP`, `VAKT_JUICE_SHOP_SHA` | `../juice-shop`, commit `a520e158` |
+
+Source code for the long samples and tokenizer cases is read with
+`git show <sha>:<path>` at the pinned commits, never from the working tree.
+Fixtures are therefore reproducible from upstream and can't pick up local,
+uncommitted edits. Both JSON files record the source SHAs under `sources`.
 
 ## Regenerate everything
 
 ```sh
-PY=/Users/shearer/vaktex/classification_models/.venv/bin/python
+PY=$VAKT_CLASSIFICATION_MODELS/.venv/bin/python
 
 $PY tools/make_mock_checkpoint.py                 # fp32 -> testdata/models/mock-dom-0.8b/model.safetensors        (~1 min)
 $PY tools/make_mock_checkpoint.py --dtype bf16    # bf16 -> testdata/models/mock-dom-0.8b-bf16/model.safetensors   (~1 min)
@@ -120,8 +127,9 @@ There are 48 samples:
 `batch` holds one padded batch of 4 samples of mixed length
 (`py_os_system`, `c_gets`, `empty`, `java_sql`). It stores the
 `input_ids`/`attention_mask` that were fed in and the outputs, plus
-`max_abs_diff_vs_single`. The measured difference is 1.4e-5 on the pooled
-vector and logits, and 2.7e-7 on severity. Use these as the tolerance
+`max_abs_diff_vs_single`. The measured maxima are 1.44e-5 on pooled and
+family logits, 7.9e-6 on the binary logit, 2.7e-6 on family probabilities and
+2.7e-7 on severity. Use these as the tolerance
 scale: batch and single agree to float32 reduction-order noise.
 
 ### `testdata/parity/tokenizer_cases.json`

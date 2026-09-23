@@ -10,9 +10,17 @@ import os
 import sys
 from pathlib import Path
 
-CLASSIFICATION_MODELS = Path(
-    os.environ.get("VAKT_CLASSIFICATION_MODELS", "/Users/shearer/vaktex/classification_models")
-)
+# tools/ lives at <classification_models>/Harness/tools, so the default is two
+# levels up; worktrees under Harness/.worktrees/<name>/tools are handled too.
+def _default_root() -> Path:
+    here = Path(__file__).resolve().parent
+    for parent in here.parents:
+        if (parent / "experiment").is_dir() and (parent / "Qwen3.5-0.8B-Base").is_dir():
+            return parent
+    return here.parent.parent
+
+
+CLASSIFICATION_MODELS = Path(os.environ.get("VAKT_CLASSIFICATION_MODELS", str(_default_root())))
 BASE_MODEL = CLASSIFICATION_MODELS / "Qwen3.5-0.8B-Base"
 TESTDATA = Path(
     os.environ.get("VAKT_TESTDATA", str(CLASSIFICATION_MODELS / "Harness" / "testdata"))
