@@ -16,7 +16,7 @@ import (
 // UTF-8 rune boundary inside a pathological line. Parts cover u.Code exactly
 // and in order.
 func SplitOversize(u core.Unit, _ []byte, countTokens func(code string) int, maxTokens int) []core.Unit {
-	if countTokens(u.Code) <= maxTokens {
+	if len(u.Code) <= maxTokens*16 && countTokens(u.Code) <= maxTokens {
 		return []core.Unit{u}
 	}
 	parts := splitCode(u.Code, countTokens, maxTokens)
@@ -48,7 +48,10 @@ func splitCode(code string, count func(string) int, budget int) []string {
 	var parts []string
 	rest := code
 	for len(rest) > 0 {
-		if count(rest) <= budget {
+		// Only test the whole remainder when it could plausibly fit (a token
+		// is at least one byte, so > budget*16 bytes essentially never does);
+		// re-tokenizing a multi-MiB remainder before every cut was quadratic.
+		if len(rest) <= budget*16 && count(rest) <= budget {
 			parts = append(parts, rest)
 			break
 		}
