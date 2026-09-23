@@ -77,6 +77,59 @@ fetch() { # dir repo tag commit
 mkdir -p "$src"
 fetch "$src/mlx" "$MLX_REPO" "$MLX_TAG" "$MLX_COMMIT"
 fetch "$src/mlx-c" "$MLXC_REPO" "$MLXC_TAG" "$MLXC_COMMIT"
+# A checkout at the right commit can still carry stray local edits: reset it
+# (our patches are re-applied below).
+for d in "$src/mlx" "$src/mlx-c"; do
+	git -C "$d" reset --quiet --hard HEAD
+	git -C "$d" clean --quiet -fdx
+done
+
+# Dependencies MLX would otherwise download at configure time. They are
+# fetched here, verified against pinned hashes, and handed to CMake with
+# FETCHCONTENT_FULLY_DISCONNECTED so configure makes no network requests.
+# nlohmann/json parses the (untrusted) safetensors header inside MLX.
+sha256() { if command -v sha256sum >/dev/null; then sha256sum "$1"; else shasum -a 256 "$1"; fi | cut -d' ' -f1; }
+fetch_pinned() { # name url sha256 -> $deps/<name> (extracted)
+	local name="$1" url="$2" want="$3" out="$deps/$1"
+	[[ -f "$out/.vakt-sha256" && "$(cat "$out/.vakt-sha256")" == "$want" ]] && return 0
+	rm -rf "$out" && mkdir -p "$out"
+	local arc="$deps/$name.download"
+	curl --proto '=https' --tlsv1.2 -fsSL "$url" -o "$arc"
+	local got
+	got="$(sha256 "$arc")"
+	if [[ "$got" != "$want" ]]; then
+		echo "error: $name checksum mismatch (got $got, want $want)" >&2
+		rm -f "$arc"
+		exit 1
+	fi
+	case "$url" in
+	*.zip) (cd "$out" && unzip -q "$arc") ;;
+	*) tar -C "$out" -xf "$arc" ;;
+	esac
+	# Archives wrap everything in one top-level directory; flatten it.
+	local inner
+	inner="$(find "$out" -mindepth 1 -maxdepth 1 -type d)"
+	if [[ "$(printf '%s\n' "$inner" | wc -l)" -eq 1 && -n "$inner" ]]; then
+		(shopt -s dotglob && mv "$inner"/* "$out"/ && rmdir "$inner")
+	fi
+	rm -f "$arc"
+	echo "$want" > "$out/.vakt-sha256"
+}
+deps="$src/deps"
+mkdir -p "$deps"
+fetch_pinned json https://github.com/nlohmann/json/releases/download/v3.11.3/json.tar.xz \
+	d6c65aca6b1ed68e7a182f4757257b107ae403032760ed6ef121c9d55e81757d
+fetch "$deps/fmt" https://github.com/fmtlib/fmt.git 12.1.0 407c905e45ad75fc29bf0f9bb7c5c2fd3475976f
+dep_opts=(
+	-DFETCHCONTENT_FULLY_DISCONNECTED=ON
+	-DFETCHCONTENT_SOURCE_DIR_JSON="$deps/json"
+	-DFETCHCONTENT_SOURCE_DIR_FMT="$deps/fmt"
+)
+if [[ "$backend" == metal ]]; then
+	fetch_pinned metal_cpp https://developer.apple.com/metal/cpp/files/metal-cpp_26.zip \
+		4df3c078b9aadcb516212e9cb03004cbc5ce9a3e9c068fa3144d021db585a3a4
+	dep_opts+=(-DFETCHCONTENT_SOURCE_DIR_METAL_CPP="$deps/metal_cpp")
+fi
 
 # Local patches (idempotent).
 for p in "$here"/patches/mlx-*.patch; do
@@ -120,6 +173,7 @@ opts=(
 	-DMLX_C_BUILD_EXAMPLES=OFF
 	-DMLX_C_USE_SYSTEM_MLX=ON
 	${launcher[@]+"${launcher[@]}"}
+	"${dep_opts[@]}"
 )
 
 case "$backend" in
