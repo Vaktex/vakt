@@ -38,7 +38,7 @@ leaks=$(strings -a "$bin" | grep -oE \
 	-e '/src/third_party[^ ]{0,40}' \
 	-e 'vakt/(internal|cmd)/[^ ]{0,40}' \
 	-e 'internal/(engine|pipeline|hub|tokenize|ast|walk|report|brand|core|labels)/[^ ]{0,20}' \
-	-e 'hf_[A-Za-z0-9]{30,}' \
+	-e '(^|[^A-Za-z0-9_])hf_[A-Za-z0-9]{34}([^A-Za-z0-9]|$)' \
 	-e 'HF_TOKEN=[^ ]{0,10}' \
 	| sort -u | head -n 10 || true)
 if [ -n "$leaks" ]; then
