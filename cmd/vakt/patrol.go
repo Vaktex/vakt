@@ -26,7 +26,7 @@ const (
 	defaultThreshold    = 0.5
 	defaultTop          = 25
 	defaultMinTokens    = 16
-	defaultBatchTokens = 4096
+	defaultBatchTokens  = 4096
 	defaultMaxFileBytes = 2 << 20
 	defaultOut          = brand.Binary + "-report.json"
 	defaultModel        = "hf:" + brand.ModelRepo + "@main"
@@ -58,6 +58,7 @@ type ScanOptions struct {
 	Include, Exclude []string
 	MaxFileBytes     int64
 	FollowSymlinks   bool
+	NoRepoIgnores    bool
 
 	// Model. Exactly one of ModelPath or ModelRepo is set.
 	Model         string // the raw --model value
@@ -125,6 +126,7 @@ func newPatrolCmd() *cobra.Command {
 	f.StringVar(&devices, "devices", "", "comma-separated GPU indices to use (e.g. 0,1)")
 	f.Int64Var(&o.MaxFileBytes, "max-file-bytes", defaultMaxFileBytes, "skip files larger than this")
 	f.BoolVar(&o.FollowSymlinks, "follow-symlinks", false, "follow symlinks (never outside the scan root)")
+	f.BoolVar(&o.NoRepoIgnores, "no-repo-ignores", false, "ignore the scanned tree's .gitignore/.vaktignore (for untrusted code: the tree cannot hide files)")
 	f.BoolVarP(&o.Quiet, "quiet", "q", false, "print only the summary line")
 	f.BoolVar(&o.NoColor, "no-color", false, "disable colour (also NO_COLOR)")
 	f.Float64Var(&o.FailOn, "fail-on", 0, "exit with status 2 if any unit scores >= this")

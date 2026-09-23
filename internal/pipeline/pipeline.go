@@ -14,7 +14,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -134,11 +133,9 @@ func Run(ctx context.Context, cfg Config, engines []core.Engine, tok core.Tokeni
 			defer wgParse.Done()
 			for f := range files {
 				prog.FilesFound.Add(1)
-				src, err := readFile(f.Path, f.Size)
-				if err != nil {
-					addSkip(f.Rel, "unreadable")
-					continue
-				}
+				// walk read the file through its root-bound handle; never
+				// reopen f.Path (a path swap could escape the root).
+				src := f.Data
 				lang, ok := ast.Detect(f.Rel, src[:min(len(src), 8192)])
 				if !ok {
 					addSkip(f.Rel, "not source code")
@@ -309,27 +306,6 @@ func Run(ctx context.Context, cfg Config, engines []core.Engine, tok core.Tokeni
 		Backend: info.Backend, Device: info.Device, Precision: info.Precision,
 	}
 	return report.Build(meta, out, cfg.Threshold), nil
-}
-
-// readFile reads at most size+1 bytes (the walk already capped the size; a
-// file that grew since is truncated rather than read unbounded).
-func readFile(path string, size int64) ([]byte, error) {
-	f, err := os.Open(path) // #nosec G304 -- path produced by walk inside the root
-	if err != nil {
-		return nil, err
-	}
-	defer f.Close()
-	buf := make([]byte, size)
-	n, err := f.Read(buf)
-	for n < len(buf) && err == nil {
-		var m int
-		m, err = f.Read(buf[n:])
-		n += m
-	}
-	if err != nil && n == 0 && size > 0 {
-		return nil, err
-	}
-	return buf[:n], nil
 }
 
 // encodeUnit renders the training prompt, splits units whose prompt exceeds

@@ -66,7 +66,7 @@ func nativeScan(ctx context.Context, o ScanOptions, prog *report.Progress) (*rep
 	}
 	cfg := pipeline.Config{
 		Root:        o.Root,
-		Walk:        walk.Options{Include: o.Include, Exclude: o.Exclude, MaxFileBytes: o.MaxFileBytes, FollowSymlinks: o.FollowSymlinks, Jobs: o.Jobs},
+		Walk:        walk.Options{Include: o.Include, Exclude: o.Exclude, MaxFileBytes: o.MaxFileBytes, FollowSymlinks: o.FollowSymlinks, NoRepoIgnores: o.NoRepoIgnores, Jobs: o.Jobs},
 		AST:         ast.Options{},
 		BatchTokens: o.BatchTokens,
 		Jobs:        o.Jobs,
