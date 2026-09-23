@@ -79,7 +79,23 @@ func bestCut(s string, count func(string) int, budget int) int {
 		lo = hi
 		hi = min(len(s), hi*2)
 	}
-	for lo < hi {
+	// Narrow with one proportional estimate: prefix length scales ~linearly
+	// with token count, so aim 3% under the budget from the window's
+	// measured density. If it fits, the answer lies in [est, est+band];
+	// the binary search below then needs only a few probes.
+	if hi > lo+1024 {
+		if n := count(s[:hi]); n > budget {
+			est := int(float64(hi) * float64(budget) / float64(n) * 0.97)
+			if est > lo && est < hi && count(s[:est]) <= budget {
+				lo = est
+				if band := est + max(hi/32, 1024); band < hi && count(s[:band]) > budget {
+					hi = band
+				}
+			}
+		}
+	}
+	// Coarse is fine: the final cut snaps back to a line boundary anyway.
+	for lo < hi && hi-lo > 64 {
 		mid := (lo + hi + 1) / 2
 		if count(s[:mid]) <= budget {
 			lo = mid
