@@ -39,7 +39,7 @@ const (
 	// (roughly pattern runes x name runes summed over lookups). Real trees
 	// use a tiny fraction; a hostile tree that exhausts it just stops
 	// having its ignore files honoured, which scans more, never less.
-	maxMatchSteps = 2_000_000_000
+	maxMatchSteps = 200_000_000
 )
 
 type ignorePattern struct {
@@ -84,9 +84,10 @@ func (g *seg) match(name string, nameR []rune) bool {
 // file lives in, relative to the repository root, with forward slashes ("" for
 // the repository root itself).
 type ignoreFile struct {
-	base string
-	pats []ignorePattern
-	cost int // sum of pattern rune lengths (matching work per name rune)
+	base         string
+	pats         []ignorePattern
+	cost         int // sum of unanchored pattern rune lengths (work per base-name rune)
+	anchoredCost int // sum of anchored pattern rune lengths x segments (work per path rune)
 }
 
 // ignoreChain is an immutable linked list of ignore files, deepest first.
@@ -144,8 +145,10 @@ func (c *ignoreChain) ignoredMetered(full string, isDir bool, m *matchMeter) boo
 			continue
 		}
 		pats := n.file.pats
-		// Charge this file's worst-case matching cost up front.
-		if !m.spend(n.file.cost * (len(baseR) + 1)) {
+		// Charge this file's worst-case matching cost up front: unanchored
+		// patterns see the base name, anchored ones (and "**") every
+		// segment of the path relative to the ignore file.
+		if !m.spend(n.file.cost*(len(baseR)+1) + n.file.anchoredCost*(utf8.RuneCountInString(p)+1)) {
 			return false
 		}
 		for i := len(pats) - 1; i >= 0; i-- {
@@ -225,6 +228,18 @@ func countGlob2(pat []seg) int {
 // hit (per-file, per-walk, or an over-long pattern).
 func parseIgnore(base string, data []byte, budget *atomic.Int64) (f *ignoreFile, truncated bool) {
 	data = bytes.TrimPrefix(data, []byte("\xef\xbb\xbf"))
+	if len(data) > maxIgnoreFileBytes {
+		data = data[:maxIgnoreFileBytes]
+		// Read was cut at the cap: the last line may be half a pattern
+		// (e.g. `**/*aaaa` of a longer one), which could hide more than
+		// intended. Drop it.
+		if i := bytes.LastIndexByte(data, '\n'); i >= 0 {
+			data = data[:i]
+		} else {
+			data = nil
+		}
+		truncated = true
+	}
 	f = &ignoreFile{base: base}
 	for len(data) > 0 {
 		if len(f.pats) >= maxPatternsPerFile {
@@ -253,8 +268,14 @@ func parseIgnore(base string, data []byte, budget *atomic.Int64) (f *ignoreFile,
 			return f, true
 		}
 		f.pats = append(f.pats, p)
+		pc := 0
 		for _, sg := range p.segs {
-			f.cost += len(sg.runes) + 1
+			pc += len(sg.runes) + 1
+		}
+		if p.anchored {
+			f.anchoredCost += pc * len(p.segs)
+		} else {
+			f.cost += pc
 		}
 	}
 	return f, truncated

@@ -139,45 +139,67 @@ const (
 // comments and string/char literals are not counted: otherwise `A</*>*/`
 // hides every '>' from the count while the parser sees only '<'.
 func pathological(lang string, src []byte) bool {
+	// Two floored counts: one over raw bytes, one skipping comments and
+	// literals. A lexer mistake can then only make the check stricter
+	// (the raw count still sees what the lexer skipped), and closing
+	// brackets placed first cannot pre-pay for later openers.
+	var raw, lexed bracketCount
 	lex := lexerFor(lang)
-	var open [4]int // ( [ { <
-	var worst int
-	for i := 0; i < len(src); i++ {
-		c := src[i]
-		if skip := lex.skip(src, i); skip > 0 {
-			i += skip - 1
-			continue
-		}
-		switch c {
-		case '(':
-			open[0]++
-		case ')':
-			open[0]--
-		case '[':
-			open[1]++
-		case ']':
-			open[1]--
-		case '{':
-			open[2]++
-		case '}':
-			open[2]--
-		case '<':
-			open[3]++
-		case '>':
-			open[3]--
-		default:
-			continue
-		}
-		depth := open[0] + open[1] + open[2]
-		if depth > maxNesting {
+	skipUntil := 0
+	for i, c := range src {
+		if raw.add(c) {
 			return true
 		}
-		worst = max(worst, open[0], open[1], open[2])
-		if worst > maxUnbalanced || open[3] > maxUnbalancedAngle {
+		if i < skipUntil {
+			continue
+		}
+		if n := lex.skip(src, i); n > 0 {
+			skipUntil = i + n
+			continue
+		}
+		if lexed.add(c) {
 			return true
 		}
 	}
 	return false
+}
+
+// bracketCount tracks open ( [ { < with counts floored at zero.
+type bracketCount struct{ open [4]int }
+
+// add counts c and reports whether the limits are exceeded.
+func (b *bracketCount) add(c byte) bool {
+	k := -1
+	closing := false
+	switch c {
+	case '(':
+		k = 0
+	case ')':
+		k, closing = 0, true
+	case '[':
+		k = 1
+	case ']':
+		k, closing = 1, true
+	case '{':
+		k = 2
+	case '}':
+		k, closing = 2, true
+	case '<':
+		k = 3
+	case '>':
+		k, closing = 3, true
+	default:
+		return false
+	}
+	if closing {
+		b.open[k] = max(0, b.open[k]-1)
+		return false
+	}
+	b.open[k]++
+	if k == 3 {
+		return b.open[3] > maxUnbalancedAngle
+	}
+	return b.open[k] > maxUnbalanced || b.open[0]+b.open[1]+b.open[2] > maxNesting
 }
 
 // lexer knows just enough of a language's comment and literal syntax to
@@ -688,6 +710,14 @@ func (x *extractor) leadingComments(n *ts.Node) int {
 		}
 		lineStart = prevStart
 	}
+	if lineStart < x.maxEnd {
+		// Never reach back into an earlier unit (a brace-less Scala def
+		// can end after a comment that precedes the next definition).
+		lineStart = min(start, max(lineStart, x.maxEnd))
+		if nl := bytes.IndexByte(x.src[lineStart:start], '\n'); nl >= 0 && lineStart != start {
+			lineStart += nl + 1
+		}
+	}
 	return lineStart
 }
 
@@ -859,8 +889,17 @@ func (x *extractor) text(n *ts.Node) string {
 	if sb < 0 || eb > len(x.src) || sb > eb {
 		return ""
 	}
+	// Only used for names: never copy more than a name could need.
+	eb = min(eb, sb+maxNameBytes)
 	return string(x.src[sb:eb])
 }
+
+// maxNameBytes bounds text copied for a unit name (clean keeps 200 runes).
+const maxNameBytes = 1024
+
+// minResidualBytes: top-level code this long is scored even when it is
+// fewer than MinLines lines (a one-line payload is still code).
+const minResidualBytes = 200
 
 // residual returns the top-level code not covered by any unit, if it has
 // at least minLines non-blank lines. Lines keep their text; gaps between
@@ -903,7 +942,7 @@ func (x *extractor) residual(minLines int) (core.Unit, bool) {
 		}
 		lineStart = end + 1
 	}
-	if nonBlank < minLines || first < 0 {
+	if first < 0 || (nonBlank < minLines && len(bytes.TrimSpace(buf.Bytes())) < minResidualBytes) {
 		return core.Unit{}, false
 	}
 	return core.Unit{
