@@ -23,7 +23,10 @@ make audit             # release hygiene checks on dist/<asset>
 make checksums         # dist/SHA256SUMS
 ```
 
-`BACKEND` is one of `auto` (the default), `metal`, `cuda`, `cpu` and `fake`. `fake` builds without the native model engine, for CI linting and pipeline development.
+`BACKEND` is one of `auto` (the default), `metal`, `cuda`, `cpu` and `fake`.
+
+- `auto` picks `metal` on macOS. On Linux it picks `cuda` when `nvcc` is on PATH, otherwise `cpu`.
+- `fake` builds without the native model engine, for CI linting and pipeline development. It produces `vakt-<os>-<arch>-fake`, which is never a release asset and is left out of `SHA256SUMS`.
 
 | Backend | Build tags | Asset |
 |---|---|---|
@@ -31,7 +34,7 @@ make checksums         # dist/SHA256SUMS
 | cuda | `mlx cuda` | `vakt-linux-<arch>-cuda13` |
 | cpu | `mlx` | `vakt-linux-<arch>-cpu` |
 
-`VERSION` defaults to `git describe`, and `COMMIT` to the short HEAD. Both are stamped into `internal/brand` along with `BACKEND`, using `-X`. That still works under garble.
+`VERSION` defaults to `git describe`, and `COMMIT` to the short HEAD. Both are stamped into `internal/brand` along with `BACKEND`, using `-X`. That still works under garble. `vakt version` prints `version=… commit=… backend=…`, and `make audit` fails unless those match what the Makefile passed in.
 
 ## Linux via Docker
 
@@ -55,6 +58,7 @@ The build uses `nvidia/cuda:13.0.1-cudnn-devel-ubuntu24.04` (CUDA) or `ubuntu:24
 - `github.com/vaktex` appears in the build info or strings;
 - build-machine home paths or source-layout paths appear;
 - anything that looks like an HF token appears;
+- Linux container build paths (`/root/`, `.cargo/registry`, `/src/third_party`) appear. Native objects are built with `-ffile-prefix-map` and Rust with `--remap-path-prefix`, so these paths stay out;
 - DWARF or debug sections are present;
 - on macOS, the code signature does not verify.
 
@@ -67,4 +71,4 @@ make prod CODESIGN_IDENTITY="Developer ID Application: Vaktex (TEAMID)" \
           NOTARIZE=1 NOTARY_PROFILE=vaktex-notary
 ```
 
-A real identity turns on the hardened runtime with `scripts/entitlements.plist`, which grants `allow-jit` so the MLX Metal JIT keeps working.
+A real identity turns on the hardened runtime with a secure timestamp, which notarization requires. No entitlements are needed: Metal shaders are compiled out of process by MTLCompilerService, not in `vakt`'s own address space.

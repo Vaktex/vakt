@@ -49,8 +49,13 @@ TAGS_cuda  := mlx cuda
 TAGS_fake  :=
 TAGS       := $(TAGS_$(BACKEND))
 
-# Release asset name.
-ifeq ($(GOOS),darwin)
+# Release asset name. Non-release backends get a suffix so they can never be
+# mistaken for (or overwrite) a published asset.
+ifeq ($(BACKEND),fake)
+  ASSET := vakt-$(GOOS)-$(GOARCH)-fake
+else ifeq ($(GOOS)-$(BACKEND),darwin-cpu)
+  ASSET := vakt-darwin-$(GOARCH)-cpu
+else ifeq ($(GOOS),darwin)
   ASSET := vakt-darwin-$(GOARCH)
 else ifeq ($(BACKEND),cuda)
   ASSET := vakt-$(GOOS)-$(GOARCH)-cuda13
@@ -75,6 +80,14 @@ BIN_DIR  := bin
 DIST_DIR := dist
 PKG      := ./cmd/vakt
 
+# Native-engine packages that exist in this checkout (pipeline lands in Phase 2).
+NATIVE_PKGS = $(shell for d in ./internal/engine ./internal/pipeline; do [ -d "$$d" ] && echo "$$d/..."; done)
+
+# Keep build-machine paths out of native objects (C/C++ __FILE__, Rust panics).
+export CGO_CFLAGS   := $(CGO_CFLAGS) -ffile-prefix-map=$(CURDIR)=.
+export CGO_CXXFLAGS := $(CGO_CXXFLAGS) -ffile-prefix-map=$(CURDIR)=.
+export RUSTFLAGS    := $(RUSTFLAGS) --remap-path-prefix=$(CURDIR)=. --remap-path-prefix=$(HOME)=~
+
 .PHONY: help deps deps-mlx deps-tokenizers dev prod sign test parity bench lint audit checksums clean print-%
 
 help: ## Show targets
@@ -88,6 +101,7 @@ deps: deps-tokenizers deps-mlx ## Build native deps for BACKEND
 
 deps-mlx:
 ifneq ($(BACKEND),fake)
+	@[ -x third_party/mlx/build.sh ] || { echo 'deps: third_party/mlx/build.sh is missing (it lands with the engine)'; exit 1; }
 	./third_party/mlx/build.sh $(BACKEND)
 endif
 
@@ -102,6 +116,7 @@ dev: ## Fast unobfuscated build into bin/vakt
 
 prod: ## Obfuscated, stripped release build into dist/$(ASSET)
 	@mkdir -p $(DIST_DIR)
+	@if [ '$(BACKEND)' = fake ]; then echo 'note: BACKEND=fake produces $(ASSET), which is not a release asset'; fi
 	@test -x '$(GARBLE)' || { echo 'garble not found: go install mvdan.cc/garble@v0.18.0'; exit 1; }
 	$(GARBLE) -literals -tiny -seed=random build -trimpath -buildvcs=false \
 		-tags '$(TAGS)' -ldflags '-s -w $(XFLAGS)' -o $(DIST_DIR)/$(ASSET) $(PKG)
@@ -111,8 +126,8 @@ prod: ## Obfuscated, stripped release build into dist/$(ASSET)
 sign: ## Strip local symbols and codesign (darwin)
 ifeq ($(GOOS),darwin)
 	strip -x $(DIST_DIR)/$(ASSET)
-	codesign --force --sign "$${CODESIGN_IDENTITY:--}" --timestamp=none \
-		$(if $(CODESIGN_IDENTITY),--options runtime --entitlements scripts/entitlements.plist) \
+	codesign --force --sign "$${CODESIGN_IDENTITY:--}" \
+		$(if $(CODESIGN_IDENTITY),--timestamp --options runtime,--timestamp=none) \
 		$(DIST_DIR)/$(ASSET)
 	@if [ "$${NOTARIZE:-0}" = 1 ]; then ./scripts/notarize.sh $(DIST_DIR)/$(ASSET); fi
 else
@@ -122,14 +137,14 @@ endif
 test: ## Unit tests (race); native engine tests when BACKEND != fake
 	$(GO) test -race ./...
 ifneq ($(BACKEND),fake)
-	$(GO) test -tags '$(TAGS)' ./internal/engine/... ./internal/pipeline/...
+	$(GO) test -tags '$(TAGS)' $(NATIVE_PKGS)
 endif
 
 parity: ## Numerical parity against the PyTorch reference fixtures
 	$(GO) test -tags '$(TAGS)' -run Parity -count=1 -v ./internal/engine/...
 
 bench: ## Engine and pipeline benchmarks
-	$(GO) test -tags '$(TAGS)' -run '^$$' -bench . -benchtime 3x ./internal/engine/... ./internal/pipeline/...
+	$(GO) test -tags '$(TAGS)' -run '^$$' -bench . -benchtime 3x $(NATIVE_PKGS)
 
 lint: ## vet, staticcheck, gosec, govulncheck, shellcheck
 	$(GO) vet ./...
@@ -137,14 +152,15 @@ lint: ## vet, staticcheck, gosec, govulncheck, shellcheck
 	gosec -quiet -exclude-dir=third_party -exclude-dir=.worktrees ./...
 	govulncheck ./...
 	@if [ -f install.sh ]; then shellcheck -s sh install.sh; fi
-	shellcheck scripts/*.sh
+	shellcheck scripts/*.sh scripts/docker/*.sh
 
 audit: ## Release hygiene checks on dist/$(ASSET)
-	./scripts/audit.sh $(DIST_DIR)/$(ASSET)
+	EXPECT_VERSION='$(VERSION)' EXPECT_BACKEND='$(BACKEND)' ./scripts/audit.sh $(DIST_DIR)/$(ASSET)
 
-checksums: ## Write dist/SHA256SUMS
-	cd $(DIST_DIR) && { command -v sha256sum >/dev/null && sha256sum vakt-* $$( [ -f install.sh ] && echo install.sh ) \
-		|| shasum -a 256 vakt-* $$( [ -f install.sh ] && echo install.sh ); } > SHA256SUMS
+checksums: ## Write dist/SHA256SUMS (release assets + install.sh)
+	@if [ -f install.sh ]; then cp install.sh $(DIST_DIR)/install.sh; fi
+	cd $(DIST_DIR) && files=$$(ls vakt-* install.sh 2>/dev/null | grep -v -- '-fake$$') && \
+		{ if command -v sha256sum >/dev/null; then sha256sum $$files; else shasum -a 256 $$files; fi; } > SHA256SUMS
 	@cat $(DIST_DIR)/SHA256SUMS
 
 clean: ## Remove build outputs

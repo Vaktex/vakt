@@ -1,0 +1,10 @@
+.git
+.worktrees
+bin
+dist
+testdata/models
+third_party/src
+third_party/*/build
+third_party/*/install
+third_party/tokenizers/lib
+.ccache
