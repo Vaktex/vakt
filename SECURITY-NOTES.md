@@ -10,7 +10,14 @@ mlx-c takes `int` (int32) shapes, axes and indices. Every value that crosses int
 - batch dimensions bounded by `core.MaxTokens` (16384) and the engine's batch-token budget, or
 - tensor shapes already checked by `internal/engine/safetensors` against `DOMExpectations`.
 
-`cInts` maps any value outside the int32 range to -1. mlx-c rejects that as an invalid shape or axis, so a logic error shows up as an MLX error instead of silently wrapping around. The G115 findings in this package are therefore excluded (`-exclude=G115`) for this directory only.
+Every conversion goes through a checked helper:
+
+- `cint` and `cInts` map anything outside int32 to -1, which mlx-c rejects as an invalid shape, axis or grid. A logic error therefore shows up as an MLX error instead of silently wrapping around.
+- `csize` rejects negative values.
+- `cdtype` only takes values from the closed `DType` enum.
+- `goint` only converts MLX array sizes, which are below 2^34.
+
+`internal/engine` and `internal/engine/safetensors` pass gosec with no exclusions. In `internal/engine/mlx`, four G115 findings remain. gosec reports them at line numbers in cgo-generated files, where the `#nosec` comments on the helpers can't attach. So `-exclude=G115` is applied to that one directory only. The engine security review confirmed that all four are wrappers around the checked helpers.
 
 ## Model file is untrusted input
 

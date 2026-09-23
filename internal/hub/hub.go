@@ -33,7 +33,7 @@ import (
 // DefaultEndpoint is the Hugging Face Hub.
 const DefaultEndpoint = "https://huggingface.co"
 
-// MaxModelBytes refuses absurd downloads (DOM-0.8B fp32 is ~3.2 GB).
+// MaxModelBytes refuses absurd downloads (the published bf16 DOM-0.8B is ~1.5 GB; fp32 would be ~3.2 GB).
 const MaxModelBytes int64 = 32 << 30
 
 // Options configure Resolve.

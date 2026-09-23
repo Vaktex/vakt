@@ -14,6 +14,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/vaktex/vakt/internal/ast"
 	"github.com/vaktex/vakt/internal/brand"
 )
 
@@ -42,6 +43,8 @@ func (e *exitCodeError) Error() string {
 func (e *exitCodeError) Unwrap() error { return e.err }
 
 func main() {
+	// Parse workers are this binary re-executed; serve and exit if we are one.
+	ast.MaybeServeWorker()
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	code := run(ctx, os.Args[1:], os.Stdin, os.Stdout, os.Stderr)
 	stop()
