@@ -19,3 +19,4 @@ coverage.*
 *.out
 .DS_Store
 .worktrees/
+/internal/engine/mlx/metallib/mlx.metallib

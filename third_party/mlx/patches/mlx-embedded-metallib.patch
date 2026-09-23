@@ -1,0 +1,72 @@
+diff --git a/mlx/backend/metal/device.cpp b/mlx/backend/metal/device.cpp
+index 15824d6..fa5c8f3 100644
+--- a/mlx/backend/metal/device.cpp
++++ b/mlx/backend/metal/device.cpp
+@@ -1,6 +1,7 @@
+ // Copyright © 2023-2024 Apple Inc.
+ 
+ #include <cstdlib>
++#include <dispatch/dispatch.h>
+ #include <sstream>
+ 
+ #define NS_PRIVATE_IMPLEMENTATION
+@@ -87,6 +88,28 @@ MTL::Library* try_load_framework(
+ }
+ #endif
+ 
++// vakt: an embedding program may register the metallib bytes before the
++// first Metal use so the final binary needs no external mlx.metallib.
++const void* vakt_embedded_metallib_ = nullptr;
++size_t vakt_embedded_metallib_size_ = 0;
++
++std::pair<MTL::Library*, NS::Error*> load_embedded_library(
++    MTL::Device* device) {
++  if (vakt_embedded_metallib_ == nullptr || vakt_embedded_metallib_size_ == 0) {
++    return {nullptr, nullptr};
++  }
++  // dispatch_data_create with the default destructor copies the bytes.
++  auto data = dispatch_data_create(
++      vakt_embedded_metallib_,
++      vakt_embedded_metallib_size_,
++      nullptr,
++      DISPATCH_DATA_DESTRUCTOR_DEFAULT);
++  NS::Error* error = nullptr;
++  auto lib = device->newLibrary(data, &error);
++  dispatch_release(data);
++  return {lib, error};
++}
++
+ // Firstly, search for the metallib in the same path as this binary
+ std::pair<MTL::Library*, NS::Error*> load_colocated_library(
+     MTL::Device* device,
+@@ -136,6 +159,19 @@ std::pair<MTL::Library*, NS::Error*> load_swiftpm_library(
+ MTL::Library* load_default_library(MTL::Device* device) {
+   NS::Error* error[5];
+   MTL::Library* lib;
++  // vakt: bytes registered by the host program win.
++  {
++    auto [elib, eerr] = load_embedded_library(device);
++    if (elib) {
++      return elib;
++    }
++    if (eerr) {
++      std::ostringstream msg;
++      msg << "Failed to load the embedded metallib: "
++          << eerr->localizedDescription()->utf8String();
++      throw std::runtime_error(msg.str());
++    }
++  }
+   // First try the colocated mlx.metallib
+   std::tie(lib, error[0]) = load_colocated_library(device, "mlx");
+   if (lib) {
+@@ -827,3 +863,10 @@ std::unique_ptr<void, std::function<void(void*)>> new_scoped_memory_pool() {
+ }
+ 
+ } // namespace mlx::core::metal
++
++// vakt: register metallib bytes. Must be called before the first Metal use;
++// the pointer must stay valid until the library is created.
++extern "C" void mlx_vakt_set_embedded_metallib(const void* data, size_t size) {
++  mlx::core::metal::vakt_embedded_metallib_ = data;
++  mlx::core::metal::vakt_embedded_metallib_size_ = size;
++}
