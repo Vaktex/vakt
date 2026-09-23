@@ -67,9 +67,8 @@ func (x *Ctx) AsType(a *Array, dt DType) *Array {
 	if !x.ok("astype", a) {
 		return x.empty()
 	}
-	if a.Dtype() == dt {
-		return a
-	}
+	// Always return a new handle (MLX makes same-dtype astype a no-op view),
+	// so the result's lifetime is independent of a's.
 	res := C.mlx_array_new()
 	if !x.check("astype", C.mlx_astype(&res, a.c, C.mlx_dtype(dt), x.S.c)) {
 		C.mlx_array_free(res)

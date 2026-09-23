@@ -19,3 +19,13 @@ func gpuAvailable() bool {
 	}
 	return n > 0
 }
+
+// GPUCount returns the number of GPU devices MLX can use.
+func GPUCount() int {
+	Init()
+	var n C.int
+	if C.mlx_device_count(&n, C.MLX_GPU) != 0 {
+		return 0
+	}
+	return int(n)
+}

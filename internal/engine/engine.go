@@ -20,6 +20,9 @@ type Options struct {
 	Device string
 	// DeviceIndex selects a GPU when several are present (CUDA only).
 	DeviceIndex int
+	// ModelSHA is the file's sha256 if already known (hub computes it while
+	// downloading); empty means the engine hashes the file itself.
+	ModelSHA string
 }
 
 // ErrUnavailable is returned by Open when the binary was built without a
