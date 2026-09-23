@@ -3,6 +3,7 @@
 package engine
 
 import (
+	"errors"
 	"fmt"
 	"math"
 	"strconv"
@@ -161,13 +162,15 @@ func (w *weights) free() {
 type deltaMode int
 
 const (
-	deltaKernel deltaMode = iota // Metal kernel (GPU on darwin)
-	deltaScan                    // exact per-token scan with plain ops (any device)
+	deltaKernel    deltaMode = iota // Metal kernel (GPU on darwin)
+	deltaChunkMode                  // chunked algorithm with plain ops (portable default)
+	deltaScan                       // per-token scan with plain ops (test reference only)
 )
 
 // model is the forward pass.
 type model struct {
 	w         *weights
+	cancelled func() bool // checked between layers
 	delta     deltaMode
 	kern      *mlx.Kernel
 	convKern  *mlx.Kernel
@@ -184,10 +187,16 @@ type model struct {
 // working set to one layer's activations.
 func (m *model) forward(x *mlx.Ctx, ids *mlx.Array, mask *mlx.Array, lengths []int, B, T int) *mlx.Array {
 	w := m.w
-	h := x.Take(w.embed, ids, 0) // [B, T, H], owned by x
-	lx := mlx.NewCtx(x.S)        // per-segment scratch
+	// The residual stream is carried in float32 in every precision mode
+	// (as HF does under autocast); only matmul inputs use the compute dtype.
+	h := x.AsType(x.Take(w.embed, ids, 0), mlx.Float32) // [B, T, H], owned by x
+	lx := mlx.NewCtx(x.S)                               // per-segment scratch
 	defer lx.Free()
 	for i, L := range w.layers {
+		if m.cancelled != nil && m.cancelled() {
+			x.Fail(errCancelled)
+			return x.Zeros(mlx.Float32, B, T, hidden)
+		}
 		r := h
 		n := m.rmsNorm(lx, h, L.inNorm)
 		var mixed *mlx.Array
@@ -196,10 +205,10 @@ func (m *model) forward(x *mlx.Ctx, ids *mlx.Array, mask *mlx.Array, lengths []i
 		} else {
 			mixed = m.linearAttention(lx, n, mask, L, lengths, B, T)
 		}
-		h = lx.Add(r, mixed)
+		h = lx.Add(r, lx.AsType(mixed, mlx.Float32))
 		r = h
 		n = m.rmsNorm(lx, h, L.postNorm)
-		h = lx.Add(r, m.mlp(lx, n, L))
+		h = lx.Add(r, lx.AsType(m.mlp(lx, n, L), mlx.Float32))
 		if m.evalEvery > 0 && (i+1)%m.evalEvery == 0 {
 			if err := lx.Eval(h); err != nil {
 				x.Fail(err)
@@ -224,10 +233,10 @@ func (m *model) forward(x *mlx.Ctx, ids *mlx.Array, mask *mlx.Array, lengths []i
 }
 
 // rmsNorm matches Qwen3_5RMSNorm: normalise in float32, multiply by (1+w)
-// (pre-folded into scale), cast back to the input dtype.
+// (pre-folded into scale). The output feeds matmuls, so it is cast to the
+// compute dtype.
 func (m *model) rmsNorm(x *mlx.Ctx, h, scale *mlx.Array) *mlx.Array {
-	dt := h.Dtype()
-	return x.AsType(x.RMSNorm(x.AsType(h, mlx.Float32), scale, rmsEps), dt)
+	return x.AsType(x.RMSNorm(x.AsType(h, mlx.Float32), scale, rmsEps), m.w.compute)
 }
 
 func (m *model) mlp(x *mlx.Ctx, h *mlx.Array, L layerW) *mlx.Array {
@@ -251,6 +260,7 @@ func (m *model) attention(x *mlx.Ctx, h *mlx.Array, L layerW, B, T int) *mlx.Arr
 
 	q = m.rmsNorm(x, q, L.qNorm)
 	k = m.rmsNorm(x, k, L.kNorm)
+	v = x.AsType(v, m.w.compute)
 	q = x.Transpose(q, 0, 2, 1, 3) // [B, Hq, T, D]
 	k = x.Transpose(k, 0, 2, 1, 3)
 	v = x.Transpose(v, 0, 2, 1, 3)
@@ -325,10 +335,13 @@ func (m *model) linearAttention(x *mlx.Ctx, h, mask *mlx.Array, L layerW, length
 	q = x.Multiply(q, x.Scalar(float32(1/math.Sqrt(linKeyDim))))
 
 	var core *mlx.Array // [B, T, 16, 128] f32
-	if m.delta == deltaKernel && m.kern != nil {
+	switch {
+	case m.delta == deltaKernel && m.kern != nil:
 		core = m.deltaKernel(x, q, k, v, g, beta, B, T)
-	} else {
+	case m.delta == deltaScan:
 		core = deltaScanOps(x, q, k, v, g, beta, B, T)
+	default:
+		core = deltaChunked(x, q, k, v, g, beta, B, T)
 	}
 
 	// Qwen3_5RMSNormGated: rmsnorm(core) * w (plain) * silu(z), in float32.
@@ -362,9 +375,130 @@ func l2norm(x *mlx.Ctx, a *mlx.Array) *mlx.Array {
 	return x.Multiply(a, x.Rsqrt(x.Add(ss, x.Scalar(1e-6))))
 }
 
+// deltaChunk is the chunk size of the portable chunked gated delta rule.
+const deltaChunkLen = 64
+
+// deltaChunked is torch_chunk_gated_delta_rule (the algorithm HF runs for
+// prefill) in plain MLX ops, evaluated chunk by chunk so memory is bounded
+// by one chunk's working set regardless of T. It is the portable path
+// (CPU, CUDA without a kernel). q, k: [B,T,H,Dk]; v: [B,T,H,Dv]; g, beta:
+// [B,T,H]; all f32. Returns [B,T,H,Dv].
+func deltaChunked(x *mlx.Ctx, q, k, v, g, beta *mlx.Array, B, T int) *mlx.Array {
+	const C, H, Dk, Dv = deltaChunkLen, linHeads, linKeyDim, linValDim
+	pad := (C - T%C) % C
+	Tp := T + pad
+	N := Tp / C
+	// [B,T,H,d] -> [B,H,Tp,d] (zero-padded; padded rows have beta=0, g=0).
+	toBH := func(a *mlx.Array, d int) *mlx.Array {
+		a = x.Transpose(a, 0, 2, 1, 3)
+		if pad > 0 {
+			a = x.Concatenate(2, a, x.Zeros(mlx.Float32, B, H, pad, d))
+		}
+		return a
+	}
+	toBH3 := func(a *mlx.Array) *mlx.Array { // [B,T,H] -> [B,H,Tp]
+		a = x.Transpose(a, 0, 2, 1)
+		if pad > 0 {
+			a = x.Concatenate(2, a, x.Zeros(mlx.Float32, B, H, pad))
+		}
+		return a
+	}
+	qh, kh, vh := toBH(q, Dk), toBH(k, Dk), toBH(v, Dv)
+	bh, gh := toBH3(beta), toBH3(g)
+
+	// Constant masks for one chunk.
+	ones := x.Add(x.Zeros(mlx.Float32, C, C), x.Scalar(1))
+	lowerIncl := x.Tril(ones, 0)              // j <= i
+	strictLower := x.Tril(ones, -1)           // j < i
+	eye := x.Subtract(lowerIncl, strictLower) // identity
+	upperMaskNeg := x.Multiply(x.Subtract(ones, lowerIncl), x.Scalar(-1e30))
+
+	S := x.Zeros(mlx.Float32, B, H, Dk, Dv)
+	outs := make([]*mlx.Array, 0, N)
+	cx := mlx.NewCtx(x.S) // per-chunk scratch
+	defer cx.Free()
+	for n := 0; n < N; n++ {
+		s0, s1 := n*C, (n+1)*C
+		sl4 := func(a *mlx.Array, d int) *mlx.Array {
+			return cx.Slice(a, []int{0, 0, s0, 0}, []int{B, H, s1, d}, nil)
+		}
+		sl3 := func(a *mlx.Array) *mlx.Array {
+			return cx.Slice(a, []int{0, 0, s0}, []int{B, H, s1}, nil)
+		}
+		qc, kc, vc := sl4(qh, Dk), sl4(kh, Dk), sl4(vh, Dv)
+		bc, gc := sl3(bh), sl3(gh) // [B,H,C]
+
+		cum := cx.Cumsum(gc, 2, false, true) // [B,H,C]
+		ci := cx.ExpandDims(cum, 3)          // [B,H,C,1]
+		cj := cx.ExpandDims(cum, 2)          // [B,H,1,C]
+		// exp(cum_i - cum_j) for j <= i, 0 above the diagonal (masked in log
+		// space first so exp never overflows).
+		decay := cx.Exp(cx.Add(cx.Subtract(ci, cj), upperMaskNeg)) // [B,H,C,C]
+
+		b1 := cx.ExpandDims(bc, 3)
+		kBeta := cx.Multiply(kc, b1)
+		vBeta := cx.Multiply(vc, b1)
+		kT := cx.SwapAxes(kc, 2, 3)
+
+		// HF's UT system is L = (kBeta k^T * decay) strictly lower; the
+		// solve applies (I + L)^-1. Its forward substitution (the export
+		// path) starts from X = -L and does row_i += sum_{j<i} X[i,j]*row_j.
+		X := cx.Negative(cx.Multiply(cx.Multiply(cx.Matmul(kBeta, kT), decay), strictLower))
+		Tm, err := forwardSubstitute(cx, X, eye, B, H, C)
+		if err != nil {
+			x.Fail(err)
+			return x.Zeros(mlx.Float32, B, T, H, Dv)
+		}
+		newV := cx.Matmul(Tm, vBeta)                                          // u
+		kCum := cx.Matmul(Tm, cx.Multiply(kBeta, cx.Exp(ci)))                 // w
+		attn := cx.Multiply(cx.Multiply(cx.Matmul(qc, kT), decay), lowerIncl) // intra-chunk
+		qDec := cx.Multiply(qc, cx.Exp(ci))
+		last := cx.Slice(cum, []int{0, 0, C - 1}, []int{B, H, C}, nil) // [B,H,1]
+		kDec := cx.Multiply(kc, cx.Exp(cx.Subtract(cx.ExpandDims(last, 3), ci)))
+
+		vNew := cx.Subtract(newV, cx.Matmul(kCum, S))
+		o := cx.Add(cx.Matmul(qDec, S), cx.Matmul(attn, vNew)) // [B,H,C,Dv]
+		S = cx.Add(cx.Multiply(S, cx.Exp(cx.ExpandDims(last, 3))), cx.Matmul(cx.SwapAxes(kDec, 2, 3), vNew))
+
+		if err := cx.Eval(o, S); err != nil {
+			x.Fail(err)
+			return x.Zeros(mlx.Float32, B, T, H, Dv)
+		}
+		cx.Keep(o)
+		cx.Keep(S)
+		x.Adopt(o)
+		x.Adopt(S)
+		cx.Free()
+		outs = append(outs, o)
+	}
+	out := x.Concatenate(2, outs...) // [B,H,Tp,Dv]
+	if pad > 0 {
+		out = x.Slice(out, []int{0, 0, 0, 0}, []int{B, H, T, Dv}, nil)
+	}
+	return x.Transpose(out, 0, 2, 1, 3)
+}
+
+// forwardSubstitute returns (I - L)^-1 for strictly lower-triangular L
+// ([B,H,C,C]) row by row, the same recurrence as HF's non-solver path.
+func forwardSubstitute(x *mlx.Ctx, L, eye *mlx.Array, B, H, C int) (*mlx.Array, error) {
+	rows := make([]*mlx.Array, C)
+	for i := 0; i < C; i++ {
+		ri := x.Slice(L, []int{0, 0, i, 0}, []int{B, H, i + 1, C}, nil) // [B,H,1,C]
+		if i > 0 {
+			prev := x.Concatenate(2, rows[:i]...)                          // [B,H,i,C]
+			coef := x.Slice(ri, []int{0, 0, 0, 0}, []int{B, H, 1, i}, nil) // [B,H,1,i]
+			ri = x.Add(ri, x.Matmul(coef, prev))
+		}
+		rows[i] = ri
+	}
+	m := x.Add(x.Concatenate(2, rows...), eye)
+	return m, x.Err()
+}
+
 // deltaScanOps is the exact recurrence (torch_recurrent_gated_delta_rule)
-// written with plain ops, one token at a time. It is the portable path and
-// the reference for the kernel. S is [B, Hv, Dk, Dv].
+// written with plain ops, one token at a time. It is only a test reference
+// (per-token graphs are slow and memory-hungry at long T). S is
+// [B, Hv, Dk, Dv].
 func deltaScanOps(x *mlx.Ctx, q, k, v, g, beta *mlx.Array, B, T int) *mlx.Array {
 	S := x.Zeros(mlx.Float32, B, linHeads, linKeyDim, linValDim)
 	decay := x.Exp(g) // [B, T, H]
@@ -386,3 +520,5 @@ func deltaScanOps(x *mlx.Ctx, q, k, v, g, beta *mlx.Array, B, T int) *mlx.Array 
 	}
 	return x.Concatenate(1, outs...)
 }
+
+var errCancelled = errors.New("engine: cancelled")

@@ -9,6 +9,7 @@ import (
 	"os"
 	"runtime"
 	"strings"
+	"sync"
 
 	"github.com/vaktex/vakt/internal/brand"
 	"github.com/vaktex/vakt/internal/core"
@@ -39,13 +40,15 @@ func open(opts Options) (core.Engine, error) {
 	switch prec {
 	case "fp32", "bf16":
 	case "tf32":
-		// fp32 weights and activations with TF32 tensor-core matmuls on the
-		// GPU: ~1.7x faster than strict fp32, ~1e-3 drift. MLX reads this
-		// once, before its first op, so it must be set before anything
-		// below touches MLX.
-		_ = os.Setenv("MLX_ENABLE_TF32", "1")
 	default:
 		return nil, fmt.Errorf("engine: precision must be fp32, tf32 or bf16, got %q", prec)
+	}
+
+	// MLX reads MLX_ENABLE_TF32 once per process, so the matmul mode is fixed
+	// by the first engine; a later engine asking for another mode is refused
+	// rather than silently running in the wrong one.
+	if err := pinMatmulMode(prec == "tf32"); err != nil {
+		return nil, err
 	}
 
 	// 1. The file is untrusted: validate its header before MLX parses it.
@@ -73,7 +76,10 @@ func open(opts Options) (core.Engine, error) {
 	switch opts.Device {
 	case "", "auto":
 		if gpuOK() {
-			s, backend, device = mlx.GPU(), gpuBackend, gpuName(opts.DeviceIndex)
+			if s, err = mlx.GPUDevice(opts.DeviceIndex); err != nil {
+				return nil, err
+			}
+			backend, device = gpuBackend, gpuName(opts.DeviceIndex)
 		} else {
 			s = mlx.CPU()
 		}
@@ -81,7 +87,10 @@ func open(opts Options) (core.Engine, error) {
 		if !gpuOK() {
 			return nil, fmt.Errorf("%w: no usable %s GPU", ErrUnavailable, gpuBackend)
 		}
-		s, backend, device = mlx.GPU(), gpuBackend, gpuName(opts.DeviceIndex)
+		if s, err = mlx.GPUDevice(opts.DeviceIndex); err != nil {
+			return nil, err
+		}
+		backend, device = gpuBackend, gpuName(opts.DeviceIndex)
 	case "cpu":
 		s = mlx.CPU()
 	default:
@@ -116,8 +125,14 @@ func open(opts Options) (core.Engine, error) {
 		s.Free()
 		return nil, err
 	}
-	m := &model{w: w, delta: deltaScan, evalEvery: evalEveryFromEnv(1)}
-	if backend == "metal" && os.Getenv("VAKT_DELTANET") != "scan" {
+	m := &model{w: w, delta: deltaChunkMode, evalEvery: evalEveryFromEnv(1)}
+	switch os.Getenv("VAKT_DELTANET") {
+	case "scan":
+		m.delta = deltaScan
+	case "chunked":
+		m.delta = deltaChunkMode
+	}
+	if backend == "metal" && os.Getenv("VAKT_DELTANET") == "" {
 		m.delta, m.kern = deltaKernel, newDeltaKernel()
 		m.convKern = newConvKernel()
 	}
@@ -195,7 +210,12 @@ func (e *mlxEngine) Score(ctx context.Context, batch [][]int32) ([]core.Scores, 
 	ids := x.FromInt32(flat, B, T)
 	mask3 := x.FromBool(maskv, B, T, 1)
 
+	e.m.cancelled = func() bool { return ctx.Err() != nil }
+	defer func() { e.m.cancelled = nil }()
 	hidden := e.m.forward(x, ids, mask3, lengths, B, T) // [B, T, H] f32
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 
 	// Masked mean pool in float32; where() so padded NaN/Inf can't leak.
 	hf := x.AsType(hidden, mlx.Float32)
@@ -302,6 +322,31 @@ func checkLoaded(raw map[string]*mlx.Array, want []safetensors.Expect) error {
 		default:
 			return fmt.Errorf("engine: model changed while loading: %s has dtype %s", e.Name, a.Dtype())
 		}
+	}
+	return nil
+}
+
+var (
+	matmulModeSet  bool
+	matmulModeTF32 bool
+	matmulModeMu   sync.Mutex
+)
+
+func pinMatmulMode(tf32 bool) error {
+	matmulModeMu.Lock()
+	defer matmulModeMu.Unlock()
+	if !matmulModeSet {
+		matmulModeSet, matmulModeTF32 = true, tf32
+		v := "0"
+		if tf32 {
+			v = "1"
+		}
+		// Must happen before MLX's first matmul (mlx.Init also defaults it).
+		_ = os.Setenv("MLX_ENABLE_TF32", v)
+		return nil
+	}
+	if matmulModeTF32 != tf32 {
+		return errors.New("engine: fp32 and tf32 engines cannot share a process (MLX fixes the matmul mode on first use)")
 	}
 	return nil
 }

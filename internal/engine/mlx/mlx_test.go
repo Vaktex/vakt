@@ -257,3 +257,12 @@ func TestLoadSafetensors(t *testing.T) {
 	// mean(norm) == pooled (the fixture's own invariant).
 	near(t, "pooled", vals(t, x, x.Mean(m["norm"], false, 0)), vals(t, x, m["pooled"]), 1e-5)
 }
+
+// Float32s must return logical order for views (transpose/strided slice).
+func TestFloat32sOfViews(t *testing.T) {
+	x := newCtx(t)
+	a := x.FromFloat32([]float32{0, 1, 2, 3, 4, 5}, 2, 3)
+	near(t, "transpose", vals(t, x, x.Transpose(a, 1, 0)), []float32{0, 3, 1, 4, 2, 5}, 0)
+	near(t, "strided", vals(t, x, x.Slice(a, []int{0, 0}, []int{2, 3}, []int{1, 2})), []float32{0, 2, 3, 5}, 0)
+	near(t, "column", vals(t, x, x.Slice(a, []int{0, 1}, []int{2, 2}, nil)), []float32{1, 4}, 0)
+}

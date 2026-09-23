@@ -191,9 +191,11 @@ func TestParityFixtures(t *testing.T) {
 func TestBatchInvariance(t *testing.T) {
 	f := loadFixtures(t)
 	e := openMock(t, "mock-dom-0.8b", "fp32")
+	// Mixed lengths including one long (>2k) sequence, so padding spans
+	// several attention blocks and DeltaNet chunks.
 	var batch [][]int32
 	for _, s := range f.Samples {
-		if len(s.IDs) < 600 && len(batch) < 6 {
+		if (len(s.IDs) < 600 && len(batch) < 5) || (len(s.IDs) > 1500 && len(s.IDs) < 2500) {
 			batch = append(batch, s.IDs)
 		}
 	}
@@ -206,36 +208,59 @@ func TestBatchInvariance(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if d := math.Abs(float64(alone[0].Severity - together[i].Severity)); d > 1e-4 {
-			t.Errorf("seq %d (T=%d): batch vs alone |Δs| = %.3g", i, len(ids), d)
+		d := math.Abs(float64(alone[0].Severity - together[i].Severity))
+		for j := range core.NumFamilies {
+			d = math.Max(d, math.Abs(float64(alone[0].Families[j]-together[i].Families[j])))
+		}
+		if d > 1e-4 {
+			t.Errorf("seq %d (T=%d): batch vs alone max|Δ| = %.3g", i, len(ids), d)
 		}
 	}
 }
 
 // TestDeltaKernelMatchesScan checks the Metal kernel against the portable
 // scan on real activations.
-func TestDeltaKernelMatchesScan(t *testing.T) {
+func TestDeltaKernelMatchesChunked(t *testing.T) {
 	if testDevice() == "cpu" || !gpuOK() {
 		t.Skip("Metal kernel needs the GPU")
 	}
 	f := loadFixtures(t)
 	ek := openMock(t, "mock-dom-0.8b", "fp32")
-	t.Setenv("VAKT_DELTANET", "scan")
+	t.Setenv("VAKT_DELTANET", "chunked")
 	es := openMock(t, "mock-dom-0.8b", "fp32")
-	if es.m.delta != deltaScan || ek.m.delta != deltaKernel {
+	if es.m.delta != deltaChunkMode || ek.m.delta != deltaKernel {
 		t.Fatal("engines did not pick the expected delta modes")
 	}
+	var long []int32
+	for _, s := range f.Samples {
+		if len(s.IDs) > 1500 && len(s.IDs) < 2500 {
+			long = s.IDs
+		}
+	}
+	cases := [][][]int32{}
 	for _, s := range f.Samples[:8] {
-		a, err := ek.Score(context.Background(), [][]int32{s.IDs})
+		cases = append(cases, [][]int32{s.IDs})
+	}
+	if long != nil {
+		cases = append(cases, [][]int32{long}, [][]int32{f.Samples[0].IDs, long})
+	}
+	for _, c := range cases {
+		a, err := ek.Score(context.Background(), c)
 		if err != nil {
 			t.Fatal(err)
 		}
-		b, err := es.Score(context.Background(), [][]int32{s.IDs})
+		b, err := es.Score(context.Background(), c)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if d := math.Abs(float64(a[0].Severity - b[0].Severity)); d > 1e-4 {
-			t.Errorf("%s: kernel vs scan |Δs| = %.3g", s.Name, d)
+		for i := range a {
+			d := math.Abs(float64(a[i].Severity - b[i].Severity))
+			for j := range core.NumFamilies {
+				d = math.Max(d, math.Abs(float64(a[i].Families[j]-b[i].Families[j])))
+			}
+			if d > 1e-4 {
+				t.Errorf("B=%d T=%d: kernel vs chunked max|Δ| = %.3g", len(c), len(c[i]), d)
+			}
 		}
 	}
 }
@@ -309,4 +334,45 @@ func itoa(n int) string {
 		n /= 10
 	}
 	return string(d)
+}
+
+// TestParityBF16Compute: bf16 matmuls with an f32 residual stream must stay
+// within the 1e-2 contract, including batch invariance.
+func TestParityBF16Compute(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short")
+	}
+	f := loadFixtures(t)
+	e := openMock(t, "mock-dom-0.8b", "bf16")
+	var maxS, maxP float64
+	var batch [][]int32
+	for _, s := range f.Samples {
+		if len(s.IDs) > 2048 {
+			continue
+		}
+		got, err := e.Score(context.Background(), [][]int32{s.IDs})
+		if err != nil {
+			t.Fatal(err)
+		}
+		maxS = math.Max(maxS, math.Abs(float64(got[0].Severity)-s.Severity))
+		for j := range core.NumFamilies {
+			maxP = math.Max(maxP, math.Abs(float64(got[0].Families[j])-s.Families[j]))
+		}
+		if len(batch) < 6 && len(s.IDs) < 600 {
+			batch = append(batch, s.IDs)
+		}
+	}
+	together, err := e.Score(context.Background(), batch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var maxB float64
+	for i, ids := range batch {
+		alone, _ := e.Score(context.Background(), [][]int32{ids})
+		maxB = math.Max(maxB, math.Abs(float64(alone[0].Severity-together[i].Severity)))
+	}
+	t.Logf("bf16 compute: max|Δs| = %.3g, max|Δp| = %.3g, batch invariance %.3g", maxS, maxP, maxB)
+	if maxB > 1e-2 {
+		t.Errorf("bf16 batch invariance %.3g > 1e-2", maxB)
+	}
 }

@@ -139,6 +139,18 @@ func MetalAvailable() bool {
 // CPU returns the default CPU stream.
 func CPU() *Stream { Init(); return &Stream{C.mlx_default_cpu_stream_new()} }
 
+// GPUDevice returns a new stream on GPU number i.
+func GPUDevice(i int) (*Stream, error) {
+	Init()
+	var n C.int
+	if C.mlx_device_count(&n, C.MLX_GPU) != 0 || i < 0 || i >= int(n) {
+		return nil, fmt.Errorf("mlx: GPU %d not available (%d found)", i, int(n))
+	}
+	d := C.mlx_device_new_type(C.MLX_GPU, cint(i))
+	defer C.mlx_device_free(d)
+	return &Stream{C.mlx_stream_new_device(d)}, nil
+}
+
 // GPU returns the default GPU stream (Metal or CUDA).
 func GPU() *Stream { Init(); return &Stream{C.mlx_default_gpu_stream_new()} }
 
@@ -484,6 +496,10 @@ func (x *Ctx) Float32s(a *Array) ([]float32, error) {
 	if a.Valid() && a.Dtype() != Float32 {
 		a = x.AsType(a, Float32)
 	}
+	// The raw data pointer is in the array's own memory layout: transposes
+	// and strided slices are views over another buffer. Always copy out a
+	// row-contiguous array so element i is logical element i.
+	a = x.Contiguous(a)
 	if err := x.Eval(a); err != nil {
 		return nil, err
 	}
