@@ -225,7 +225,15 @@ cmake --build "$build/mlx" -j "$jobs"
 cmake --install "$build/mlx"
 
 # 2) mlx-c against the installed MLX
-cmake -S "$src/mlx-c" -B "$build/mlx-c" "${opts[@]}" -DMLX_DIR="$prefix/share/cmake/MLX"
+mlxc_opts=()
+if [[ "$backend" == cuda ]]; then
+	# MLX's exported config links CUDA::cublasLt etc. but does not call
+	# find_package(CUDAToolkit) itself, so mlx-c's configure fails without it.
+	inc="$build/mlxc-cuda-deps.cmake"
+	printf 'find_package(CUDAToolkit REQUIRED)\n' > "$inc"
+	mlxc_opts+=(-DCMAKE_PROJECT_INCLUDE_BEFORE="$inc")
+fi
+cmake -S "$src/mlx-c" -B "$build/mlx-c" "${opts[@]}" ${mlxc_opts[@]+"${mlxc_opts[@]}"} -DMLX_DIR="$prefix/share/cmake/MLX"
 cmake --build "$build/mlx-c" -j "$jobs"
 cmake --install "$build/mlx-c"
 
