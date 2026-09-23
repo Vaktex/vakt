@@ -66,7 +66,16 @@ func bestCut(s string, count func(string) int, budget int) int {
 	// Binary search the largest fitting byte prefix (token count is
 	// monotone in prefix length up to tokenizer merges, which only ever
 	// lower counts; the search is conservative).
-	lo, hi := 0, len(s)
+	//
+	// Bound the search window first so each probe tokenizes a prefix near
+	// the budget, not the whole remaining unit: start at ~8 bytes per token
+	// and double until the prefix no longer fits (or covers s). Probing a
+	// 2 MiB unit then costs O(log) tokenizations of ~budget-sized text.
+	lo, hi := 0, min(len(s), max(budget*8, 64))
+	for hi < len(s) && count(s[:hi]) <= budget {
+		lo = hi
+		hi = min(len(s), hi*2)
+	}
 	for lo < hi {
 		mid := (lo + hi + 1) / 2
 		if count(s[:mid]) <= budget {
