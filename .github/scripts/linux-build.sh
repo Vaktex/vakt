@@ -11,7 +11,7 @@ GO_VERSION=$(awk '/^go /{print $2; exit}' go.mod)
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
 apt-get install -y -qq --no-install-recommends \
-	ca-certificates curl git build-essential cmake ninja-build ccache pkg-config \
+	ca-certificates curl git build-essential ninja-build ccache pkg-config \
 	libopenblas-dev liblapack-dev liblapacke-dev >/dev/null
 
 arch=$(dpkg --print-architecture)
@@ -24,6 +24,16 @@ case "${GO_VERSION}-${arch}" in
 esac
 curl --proto '=https' --tlsv1.2 -fsSL "https://go.dev/dl/${tarball}" -o "/tmp/${tarball}"
 echo "${want}  /tmp/${tarball}" | sha256sum -c -
+
+# MLX needs cmake >= 3.25; ubuntu22.04 ships 3.22. Pinned Kitware release.
+case $arch in
+amd64) cm_arch=x86_64; cm_sum=630615d8e98ac33eba7fbe472626dff5c899c85af3c024585ae109166a6909d0 ;;
+arm64) cm_arch=aarch64; cm_sum=609735983e3bdf24b6ab379d918458d64196fe72b98226f62dd5e9fe7b2997cc ;;
+esac
+curl --proto '=https' --tlsv1.2 -fsSL "https://github.com/Kitware/CMake/releases/download/v3.31.8/cmake-3.31.8-linux-${cm_arch}.tar.gz" -o /tmp/cmake.tgz
+echo "${cm_sum}  /tmp/cmake.tgz" | sha256sum -c -
+tar -C /usr/local --strip-components=1 -xzf /tmp/cmake.tgz
+cmake --version | head -n 1
 tar -C /usr/local -xzf "/tmp/${tarball}"
 export PATH=/usr/local/go/bin:/root/go/bin:/root/.cargo/bin:$PATH
 

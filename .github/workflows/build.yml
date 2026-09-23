@@ -56,7 +56,9 @@ jobs:
         run: |
           bats test/                          # /bin/sh is dash on Ubuntu
           sudo apt-get install -y --no-install-recommends busybox
-          VAKT_TEST_SHELL="busybox sh" bats test/
+          printf '#!/bin/sh\nexec busybox sh "$@"\n' > "$RUNNER_TEMP/bbsh"
+          chmod +x "$RUNNER_TEMP/bbsh"
+          VAKT_TEST_SHELL="$RUNNER_TEMP/bbsh" bats test/
 
   macos:
     name: macos-arm64-metal

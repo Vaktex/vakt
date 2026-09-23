@@ -16,7 +16,7 @@ flowchart LR
 
 | Job | Runner | What it does |
 |---|---|---|
-| `lint` | ubuntu-24.04 | vet, staticcheck, gosec, govulncheck and shellcheck; unit tests on `BACKEND=fake`; bats installer tests under `sh` and `dash` |
+| `lint` | ubuntu-24.04 | vet, staticcheck, gosec, govulncheck and shellcheck; unit tests on `BACKEND=fake`; bats installer tests under dash (Ubuntu's `/bin/sh`) and busybox sh |
 | `macos` | macos-15 (arm64) | MLX Metal + tokenizers deps, tests, parity (MLX CPU stream), garble prod build, audit |
 | `linux-cuda` | ubuntu-24.04 and ubuntu-24.04-arm (hosts) | CUDA 13 build inside `nvidia/cuda:13.0.3-cudnn-devel-ubuntu22.04`, pinned by digest, via `docker run`, plus audit. No GPU, so only fake-engine tests run. |
 | `linux-cpu` | ubuntu-22.04 and ubuntu-22.04-arm | MLX CPU (OpenBLAS) build; real engine tests and parity run on the CPU |
@@ -26,7 +26,7 @@ flowchart LR
 
 ## Why the CUDA build uses `docker run`
 
-The CUDA devel image plus the MLX CUDA build need more disk than a hosted runner has free. A `container:` job starts before any step can run. Instead, the job first runs `jlumbroso/free-disk-space` on the host, then builds with `docker run` and `.github/scripts/linux-build.sh`. That script also checks the Go toolchain's download against go.dev's published SHA-256.
+The CUDA devel image plus the MLX CUDA build need more disk than a hosted runner has free. A `container:` job starts before any step can run. Instead, the job first runs `jlumbroso/free-disk-space` on the host, then builds with `docker run` and `.github/scripts/linux-build.sh`. That script checks Go, cmake 3.31.8 and rustup-init against SHA-256 values pinned in the repository. Ubuntu 22.04's apt cmake is 3.22, which is too old for MLX.
 
 ## glibc floor
 
