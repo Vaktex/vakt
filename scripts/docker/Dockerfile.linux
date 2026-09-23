@@ -8,8 +8,8 @@
 # resulting binary links cudart statically and cuBLAS/cuDNN/NVRTC
 # dynamically, so hosts need the CUDA 13 runtime libraries and driver >= 580.
 
-ARG CUDA_IMAGE=nvidia/cuda:13.0.3-cudnn-devel-ubuntu24.04
-ARG CPU_IMAGE=ubuntu:24.04
+ARG CUDA_IMAGE=nvidia/cuda:13.0.3-cudnn-devel-ubuntu22.04@sha256:047cef4ac7248a01c715042dea75757268851abf1a0e6dcbd7648ff1180f1b89
+ARG CPU_IMAGE=ubuntu:22.04
 ARG BACKEND=cuda
 
 FROM ${CUDA_IMAGE} AS base-cuda
