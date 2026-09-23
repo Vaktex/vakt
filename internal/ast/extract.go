@@ -108,8 +108,8 @@ func Extract(ctx context.Context, rel, lang string, src []byte, opts Options) (u
 	defer g.pool.Put(p)
 	defer tree.Close()
 
-	x := &extractor{g: g, src: src, rel: rel, lang: lang}
-	x.walk(tree.RootNode(), "", 0)
+	x := &extractor{g: g, src: src, rel: rel, lang: lang, root: tree.RootNode()}
+	x.walk(x.root, "", 0)
 	if len(x.units) > MaxUnitsPerFile {
 		// Pathological file (e.g. generated code): score it as a whole
 		// (split later by SplitOversize) rather than as thousands of units.
@@ -180,7 +180,13 @@ type extractor struct {
 	units   []core.Unit
 	covered [][2]int // byte ranges claimed by units (for the residual)
 	lines   []int    // byte offset of each line start (built lazily)
+	root    *ts.Node
 }
+
+// maxErrorUnitLines: a definition containing a parse error that spans more
+// than this is assumed to have swallowed its neighbours (e.g. an unknown
+// export macro before a prototype) and is descended into instead.
+const maxErrorUnitLines = 400
 
 // line returns the 1-based line of byte offset off in O(log lines).
 func (x *extractor) line(off int) int {
@@ -223,9 +229,24 @@ func (x *extractor) walk(n *ts.Node, class string, depth int) {
 			return
 		}
 	case x.g.funcs[kind]:
+		if x.swallowed(n) {
+			break // recurse into the children instead
+		}
+		if x.isIIFEBody(n) {
+			break
+		}
+		if (kind == "property_declaration" || kind == "indexer_declaration") && n.EndPosition().Row-n.StartPosition().Row < 2 {
+			return // auto-property: stays in the residual
+		}
 		x.emit(n, n, class)
 		return
 	case x.g.classes[kind]:
+		if !x.hasBody(n) {
+			return // forward declaration or `struct X *p` type reference
+		}
+		if x.swallowed(n) {
+			break
+		}
 		x.classUnit(n, n, class, depth)
 		return
 	case x.g.assign[kind]:
@@ -240,11 +261,21 @@ func (x *extractor) walk(n *ts.Node, class string, depth int) {
 		// Only substantial ones become units; tiny lambdas stay in their
 		// parent's code.
 		if n.EndPosition().Row-n.StartPosition().Row >= 2 {
+			if x.isIIFE(n) || x.swallowed(n) {
+				break // module wrapper: its contents are the units
+			}
 			name := x.anonName(n)
 			if cls := strings.TrimPrefix(class, nsMark); cls != "" && name != "" {
 				name = cls + "." + name
 			}
-			x.emitNamed(x.statementOf(n), name, class, kindFor(class))
+			span := x.statementOf(n)
+			if x.coveredSpan(span) {
+				span = n
+			}
+			if x.coveredSpan(span) {
+				return
+			}
+			x.emitNamed(span, name, class, kindFor(class))
 			return
 		}
 	}
@@ -257,19 +288,101 @@ func (x *extractor) walk(n *ts.Node, class string, depth int) {
 // statement when the function is the statement's main content (so
 // `exports.x = function(){}` and `app.get(..., cb)` keep their call site).
 func (x *extractor) statementOf(fn *ts.Node) *ts.Node {
-	n := fn
 	for p := fn.Parent(); p != nil; p = p.Parent() {
 		switch p.Kind() {
 		case "expression_statement":
-			return p
-		case "assignment_expression", "call_expression", "arguments", "await_expression", "parenthesized_expression":
-			n = p
+			if x.countAnon(p, 0) == 1 {
+				return p
+			}
+			return fn // several callbacks: each is its own unit
+		case "assignment_expression", "call_expression", "arguments", "await_expression",
+			"parenthesized_expression", "member_expression":
 			continue
 		}
 		break
 	}
-	_ = n
 	return fn
+}
+
+// countAnon counts substantial anonymous functions directly in n (not
+// nested inside another function), stopping at 2.
+func (x *extractor) countAnon(n *ts.Node, depth int) int {
+	if depth > 64 {
+		return 0
+	}
+	c := 0
+	for _, ch := range children(n, true) {
+		if x.g.anon[ch.Kind()] {
+			if ch.EndPosition().Row-ch.StartPosition().Row >= 2 {
+				c++
+			}
+		} else {
+			c += x.countAnon(ch, depth+1)
+		}
+		if c >= 2 {
+			return c
+		}
+	}
+	return c
+}
+
+// coveredSpan reports whether span overlaps a unit already emitted.
+func (x *extractor) coveredSpan(n *ts.Node) bool {
+	sb, eb := int(n.StartByte()), int(n.EndByte()) // #nosec G115 -- byte offsets within src
+	for _, r := range x.covered {
+		if sb < r[1] && r[0] < eb {
+			return true
+		}
+	}
+	return false
+}
+
+// hasBody reports whether a class-like node has a body (C/C++ `struct X;`
+// and `struct X *p` are references, not definitions).
+func (x *extractor) hasBody(n *ts.Node) bool {
+	switch n.Kind() {
+	case "class_specifier", "struct_specifier", "union_specifier", "enum_specifier":
+		return n.ChildByFieldName("body") != nil
+	}
+	return true
+}
+
+// swallowed reports a definition that contains a parse error and is far
+// longer than a real function: tree-sitter's recovery glued the rest of the
+// file onto it.
+func (x *extractor) swallowed(n *ts.Node) bool {
+	return n.HasError() && n.EndPosition().Row-n.StartPosition().Row > maxErrorUnitLines
+}
+
+// isIIFE reports an anonymous function that is immediately invoked at
+// statement level (UMD/module wrappers): `(function(g){ ... })(this);`.
+func (x *extractor) isIIFE(fn *ts.Node) bool {
+	p := fn.Parent()
+	for p != nil && p.Kind() == "parenthesized_expression" {
+		p = p.Parent()
+	}
+	if p == nil || p.Kind() != "call_expression" {
+		return false
+	}
+	callee := p.ChildByFieldName("function")
+	if callee == nil || !(callee.StartByte() <= fn.StartByte() && fn.EndByte() <= callee.EndByte()) {
+		return false
+	}
+	return fn.EndPosition().Row-fn.StartPosition().Row > maxErrorUnitLines/4
+}
+
+// isIIFEBody: a large named function whose body defines several functions
+// (constructor-style JS modules like THREE.WebGLRenderer). Its members are
+// extracted individually instead of as one giant unit.
+func (x *extractor) isIIFEBody(n *ts.Node) bool {
+	if x.lang != "JavaScript" && x.lang != "TypeScript" {
+		return false
+	}
+	if n.EndPosition().Row-n.StartPosition().Row <= maxErrorUnitLines {
+		return false
+	}
+	body := n.ChildByFieldName("body")
+	return body != nil && x.countAnon(body, 0) >= 2
 }
 
 // anonName names an anonymous function from its context: the assignment
@@ -294,6 +407,11 @@ func (x *extractor) anonName(fn *ts.Node) string {
 		case "call_expression":
 			if f := p.ChildByFieldName("function"); f != nil {
 				callee := x.text(f)
+				if f.Kind() == "member_expression" {
+					if pr := f.ChildByFieldName("property"); pr != nil && strings.ContainsAny(callee, "\n(") {
+						callee = x.text(pr) // chained call: name by the method (then, catch, ...)
+					}
+				}
 				if a := p.ChildByFieldName("arguments"); a != nil {
 					for _, c := range children(a, true) {
 						if c.Kind() == "string" || c.Kind() == "template_string" {
@@ -302,6 +420,10 @@ func (x *extractor) anonName(fn *ts.Node) string {
 					}
 				}
 				return callee + " callback"
+			}
+		case "export_statement":
+			if strings.Contains(x.text(p), "default") {
+				return "default"
 			}
 		case "statement_block", "program", "class_body":
 			return "<anonymous>"
@@ -450,16 +572,61 @@ func (x *extractor) emitNamed(span *ts.Node, name, class, kind string) {
 func (x *extractor) leadingComments(n *ts.Node) int {
 	start := int(n.StartByte()) // #nosec G115 -- byte offset within src
 	lineStart := bytes.LastIndexByte(x.src[:start], '\n') + 1
+	if len(bytes.TrimSpace(x.src[lineStart:start])) != 0 {
+		// The node starts mid-line (`}).catch(function ...`): what precedes
+		// it on the line belongs to something else, and so do comments above.
+		return start
+	}
 	for k := 0; k < 64 && lineStart > 0; k++ {
 		prevEnd := lineStart - 1 // the '\n' ending the previous line
 		prevStart := bytes.LastIndexByte(x.src[:prevEnd], '\n') + 1
 		line := bytes.TrimSpace(x.src[prevStart:prevEnd])
-		if len(line) == 0 || !x.isCommentLine(line) {
+		if len(line) == 0 || !x.isCommentLine(line) || !x.isCommentNode(prevStart, prevEnd) {
 			break
 		}
 		lineStart = prevStart
 	}
 	return lineStart
+}
+
+// attrKinds are syntax node kinds that belong to the definition below them.
+var attrKinds = map[string]bool{
+	"attribute_item": true, "inner_attribute_item": true, "attribute_list": true, "attribute": true,
+	"decorator": true, "annotation": true, "marker_annotation": true, "modifiers": true,
+	"template_parameter_list": true, "template_declaration": true, "attribute_group": true,
+}
+
+// isCommentNode confirms, from the syntax tree, that the line [start,end) is
+// a comment or an attribute/decorator/template header and not code that
+// merely starts like one (`*p = 0;`, `@ beta)`, `template void f<int>();`).
+func (x *extractor) isCommentNode(start, end int) bool {
+	lo := start
+	for lo < end && (x.src[lo] == ' ' || x.src[lo] == '\t') {
+		lo++
+	}
+	if lo >= end || x.root == nil {
+		return false
+	}
+	n := x.root.DescendantForByteRange(uint(lo), uint(lo+1)) // #nosec G115 -- offsets within src
+	for d := 0; n != nil && d < 8; d++ {
+		k := n.Kind()
+		if x.g.comment[k] {
+			return true
+		}
+		if attrKinds[k] {
+			// A template header only counts if the template's definition
+			// starts after this line (not `template void f<int>(int);`).
+			if k == "template_declaration" {
+				return int(n.EndByte()) > end // #nosec G115
+			}
+			return true
+		}
+		if n.StartByte() != uint(lo) { // #nosec G115
+			return false // the line starts inside some other construct
+		}
+		n = n.Parent()
+	}
+	return false
 }
 
 // isCommentLine reports whether a trimmed line is a comment in the file's
@@ -494,6 +661,39 @@ var commentPrefixes = map[string][]string{
 // nameOf finds a definition's name: the "name" field, else the first
 // identifier-like named child, else a declarator chain (C/C++).
 func (x *extractor) nameOf(n *ts.Node) string {
+	switch n.Kind() {
+	case "impl_item":
+		// impl<T> Trait for Type<T> / impl Type: name by the base type.
+		return x.baseType(n.ChildByFieldName("type"))
+	case "operator_declaration", "conversion_operator_declaration":
+		if op := n.ChildByFieldName("operator"); op != nil {
+			return "operator " + x.text(op)
+		}
+		if t := n.ChildByFieldName("type"); t != nil {
+			return "operator " + x.text(t)
+		}
+		return "operator"
+	case "constructor_definition":
+		return "constructor"
+	case "fallback_receive_definition":
+		if strings.HasPrefix(strings.TrimSpace(x.text(n)), "receive") {
+			return "receive"
+		}
+		return "fallback"
+	case "struct_specifier", "class_specifier", "union_specifier", "enum_specifier":
+		// typedef struct { ... } name;
+		if n.ChildByFieldName("name") == nil {
+			if p := n.Parent(); p != nil && p.Kind() == "type_definition" {
+				if d := p.ChildByFieldName("declarator"); d != nil {
+					return x.text(d)
+				}
+			}
+		}
+	case "destructor_declaration":
+		if nm := n.ChildByFieldName("name"); nm != nil {
+			return "~" + x.text(nm)
+		}
+	}
 	if nm := n.ChildByFieldName("name"); nm != nil {
 		return x.text(nm)
 	}
@@ -502,7 +702,12 @@ func (x *extractor) nameOf(n *ts.Node) string {
 		// C++ out-of-line definitions keep their qualifier (Foo::bar).
 		for d != nil {
 			switch d.Kind() {
-			case "qualified_identifier", "identifier", "field_identifier", "destructor_name", "operator_name", "template_function":
+			case "qualified_identifier", "identifier", "field_identifier", "destructor_name", "operator_name", "template_function", "operator_cast":
+				if d.Kind() == "operator_cast" {
+					if t := d.ChildByFieldName("type"); t != nil {
+						return "operator " + x.text(t)
+					}
+				}
 				return strings.ReplaceAll(x.text(d), "::", ".")
 			}
 			if inner := d.ChildByFieldName("declarator"); inner != nil {
@@ -670,6 +875,34 @@ func children(n *ts.Node, namedOnly bool) []*ts.Node {
 			return out
 		}
 	}
+}
+
+// baseType returns the base type name of a Rust type node
+// (Deserializer<R> -> Deserializer, a::b::C -> C, &'a T -> T).
+func (x *extractor) baseType(t *ts.Node) string {
+	for d := 0; t != nil && d < 16; d++ {
+		switch t.Kind() {
+		case "type_identifier", "primitive_type":
+			return x.text(t)
+		case "generic_type", "scoped_type_identifier":
+			if nm := t.ChildByFieldName("type"); nm != nil && t.Kind() == "generic_type" {
+				t = nm
+				continue
+			}
+			if nm := t.ChildByFieldName("name"); nm != nil {
+				return x.text(nm)
+			}
+		case "reference_type", "pointer_type":
+			t = t.ChildByFieldName("type")
+			continue
+		}
+		cs := children(t, true)
+		if len(cs) == 0 {
+			return x.text(t)
+		}
+		t = cs[0]
+	}
+	return ""
 }
 
 // goReceiverType extracts T from a receiver list like (s *T) or (T[K]).
