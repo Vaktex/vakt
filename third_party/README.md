@@ -6,5 +6,5 @@ unmodified generated files.
 
 | Directory | Upstream | Version | License |
 | --- | --- | --- | --- |
-| `tree-sitter-vba` | https://github.com/harumiWeb/tree-sitter-vba (`vba/src`) | commit a67fd2d | MIT |
+| `tree-sitter-vba` | https://github.com/harumiWeb/tree-sitter-vba (`bindings/go`; upstream gitignores `vba/src/parser.c`, and its Go binding lives in a nested module not tagged for `go get`) | commit a67fd2d | MIT |
 | `tree-sitter-solidity` | https://github.com/JoranHonig/tree-sitter-solidity (`src`) | v1.2.13 (no Go binding upstream) | MIT |

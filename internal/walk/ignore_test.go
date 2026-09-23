@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 )
 
@@ -55,7 +56,10 @@ func TestWildmatchPathological(t *testing.T) {
 	if wildmatch(pat, name) {
 		t.Fatal("unexpected match")
 	}
-	segs := strings.Split(strings.Repeat("**/a/", 40)+"b", "/")
+	var segs []seg
+	for _, x := range strings.Split(strings.Repeat("**/a/", 40)+"b", "/") {
+		segs = append(segs, newSeg(x))
+	}
 	path := strings.Split(strings.Repeat("a/", 2000)+"c", "/")
 	if matchSegments(segs, path) {
 		t.Fatal("unexpected segment match")
@@ -68,8 +72,14 @@ type probe struct {
 	want  bool
 }
 
+// pi parses an ignore file without a walk budget.
+func pi(base string, data []byte) *ignoreFile {
+	f, _ := parseIgnore(base, data, nil)
+	return f
+}
+
 func TestIgnoreChain(t *testing.T) {
-	root := parseIgnore("", []byte(strings.Join([]string{
+	root := pi("", []byte(strings.Join([]string{
 		"# comment",
 		"",
 		"*.log",
@@ -88,7 +98,7 @@ func TestIgnoreChain(t *testing.T) {
 		"secret/",
 		"!secret/public.txt", // cannot re-include inside an excluded dir (dir pruned)
 	}, "\n")))
-	sub := parseIgnore("pkg", []byte("/local.txt\n!*.log\nonly-here\n*.gen\n!keep.gen\n"))
+	sub := pi("pkg", []byte("/local.txt\n!*.log\nonly-here\n*.gen\n!keep.gen\n"))
 	var c *ignoreChain
 	c = c.push(root).push(sub)
 
@@ -156,8 +166,8 @@ func TestParsePatternEdgeCases(t *testing.T) {
 	if len(p.segs) != 3 {
 		t.Errorf("collapsed ** segs = %v", p.segs)
 	}
-	f := parseIgnore("", []byte("\xef\xbb\xbfa.txt\r\nb.txt\r\n"))
-	if len(f.pats) != 2 || f.pats[0].segs[0] != "a.txt" || f.pats[1].segs[0] != "b.txt" {
+	f := pi("", []byte("\xef\xbb\xbfa.txt\r\nb.txt\r\n"))
+	if len(f.pats) != 2 || f.pats[0].segs[0].raw != "a.txt" || f.pats[1].segs[0].raw != "b.txt" {
 		t.Errorf("BOM/CRLF handling: %+v", f.pats)
 	}
 }
@@ -202,9 +212,9 @@ func TestIgnoreMatchesGit(t *testing.T) {
 		"excluded.md", "d/excluded.md",
 	}
 	var c *ignoreChain
-	c = c.push(parseIgnore("", []byte("excluded.md\n")))
-	c = c.push(parseIgnore("", []byte(rootIgn)))
-	c = c.push(parseIgnore("pkg", []byte(subIgn)))
+	c = c.push(pi("", []byte("excluded.md\n")))
+	c = c.push(pi("", []byte(rootIgn)))
+	c = c.push(pi("pkg", []byte(subIgn)))
 
 	for _, p := range paths {
 		write(p, "x")
@@ -231,4 +241,26 @@ func ignoredWithParents(c *ignoreChain, p string) bool {
 		}
 	}
 	return c.ignored(p, false)
+}
+
+func TestIgnoreCaps(t *testing.T) {
+	var b strings.Builder
+	for i := 0; i < maxPatternsPerFile+50; i++ {
+		b.WriteString("*a*a*a*b\n")
+	}
+	f, trunc := parseIgnore("", []byte(b.String()), nil)
+	if !trunc || len(f.pats) != maxPatternsPerFile {
+		t.Fatalf("per-file cap: %d %v", len(f.pats), trunc)
+	}
+	long := strings.Repeat("*/", 100_000) + "x\nok.txt\n"
+	f, trunc = parseIgnore("", []byte(long), nil)
+	if !trunc || len(f.pats) != 1 || f.pats[0].segs[0].raw != "ok.txt" {
+		t.Fatalf("segment cap: %+v %v", f.pats, trunc)
+	}
+	var budget atomic.Int64
+	budget.Store(3)
+	f, trunc = parseIgnore("", []byte("a\nb\nc\nd\ne\n"), &budget)
+	if !trunc || len(f.pats) != 3 {
+		t.Fatalf("walk budget: %d %v", len(f.pats), trunc)
+	}
 }
