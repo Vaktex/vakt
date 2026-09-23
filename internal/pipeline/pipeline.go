@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"golang.org/x/sync/semaphore"
 	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -371,8 +372,11 @@ func encodeUnit(u core.Unit, tok core.Tokenizer) []core.Encoded {
 	// encode: the Rust encoder needs ~180 B of scratch per input byte, so
 	// encoding 2 MB whole-file units just to learn they are too big cost
 	// gigabytes. The splitter only tokenizes budget-sized windows.
+	if strings.TrimSpace(u.Code) == "" {
+		return nil // whitespace-only: nothing to score
+	}
 	if len(u.Code) <= fastPathMaxBytes {
-		text := tokenize.Render(u.Language, u.Code)
+		text := tokenize.Render(u.Language, tokenize.PromptCode(u.Code))
 		if ids, err := tok.Encode(text); err == nil && len(ids) > 0 && len(ids) <= core.MaxTokens {
 			u.Code = "" // downstream needs only IDs; never retain the source
 			return []core.Encoded{{Unit: u, IDs: ids, Key: tokenize.PromptKey(text)}}
@@ -380,11 +384,13 @@ func encodeUnit(u core.Unit, tok core.Tokenizer) []core.Encoded {
 	}
 	// Oversize: SplitOversize bounds its search window near the budget, so
 	// each probe tokenizes ~budget-sized text.
-	count := func(code string) int { return tokenize.Count(tok, tokenize.Render(u.Language, code)) }
+	count := func(code string) int {
+		return tokenize.Count(tok, tokenize.Render(u.Language, tokenize.PromptCode(code)))
+	}
 	parts := ast.SplitOversize(u, nil, count, core.MaxTokens)
 	out := make([]core.Encoded, 0, len(parts))
 	for _, p := range parts {
-		text := tokenize.Render(p.Language, p.Code)
+		text := tokenize.Render(p.Language, tokenize.PromptCode(p.Code))
 		ids, err := tok.Encode(text)
 		if err != nil || len(ids) == 0 {
 			continue

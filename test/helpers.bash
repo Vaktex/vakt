@@ -1,3 +1,5 @@
+# Stub commands are written in single quotes on purpose (they expand when run).
+# shellcheck disable=SC2016
 # Shared bats helpers: every external command the installer consults is
 # replaced by a stub driven by STUB_* environment variables. Each stub logs
 # its argv to $CALLS so tests can assert on what ran.
@@ -86,6 +88,8 @@ run_installer() {
 BLAS_LIBS='	libopenblas.so.0 (libc6,x86-64) => /usr/lib/x86_64-linux-gnu/libopenblas.so.0
 	liblapack.so.3 (libc6,x86-64) => /usr/lib/x86_64-linux-gnu/liblapack.so.3
 '
+# Used by install.bats (sourced).
+# shellcheck disable=SC2034
 CUDA_LIBS_ALL='	libcublas.so.13 (libc6,x86-64) => /usr/lib/x86_64-linux-gnu/libcublas.so.13
 	libcublasLt.so.13 (libc6,x86-64) => /usr/lib/x86_64-linux-gnu/libcublasLt.so.13
 	libnvrtc.so.13 (libc6,x86-64) => /usr/lib/x86_64-linux-gnu/libnvrtc.so.13

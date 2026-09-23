@@ -214,6 +214,15 @@ func (t *Tokenizer) Close() error {
 }
 
 // Render is the single prompt every model sees (experiment/encoding.py).
+// PromptCode normalises a unit's code the way the training corpus stored it:
+// every one of the 1.1M training snippets has no leading or trailing
+// whitespace (str.strip() is a no-op on all of them), so a unit's trailing
+// newline or leading blank lines would put the model slightly off its
+// training distribution. Interior indentation is kept as is.
+func PromptCode(code string) string {
+	return strings.TrimSpace(code)
+}
+
 func Render(language, code string) string {
 	return "Language: " + language + "\nCode:\n" + code
 }

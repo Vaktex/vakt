@@ -200,6 +200,11 @@ func (e *mlxEngine) Score(ctx context.Context, batch [][]int32) ([]core.Scores, 
 	defer runtime.UnlockOSThread()
 	x := mlx.NewCtx(e.s)
 	defer x.Free()
+	if B*T > core.MaxTokens/2 {
+		// Long batches leave large activation buffers in MLX's cache;
+		// release them so the footprint falls back between big batches.
+		defer mlx.ClearCache()
+	}
 
 	flat := make([]int32, B*T)
 	maskv := make([]bool, B*T)
@@ -294,8 +299,9 @@ func maxBatchTokens(backend string) int {
 	if limit <= reserve {
 		return core.MaxTokens
 	}
-	n := int((limit - reserve) / perToken)
-	return min(max(n, core.MaxTokens), 32768)
+	// Clamp before converting (limit is a uint64 byte count).
+	n := min((limit-reserve)/perToken, 32768)
+	return max(int(n), core.MaxTokens) // #nosec G115 -- n <= 32768
 }
 
 func configureMemory(backend string) {

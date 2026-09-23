@@ -75,8 +75,8 @@ func MaybeServeWorker() {
 			}
 		}
 	}()
-	err := serve(os.Stdin, os.Stdout)
-	if err != nil && !errors.Is(err, io.EOF) {
+	// serve returns only when stdin fails; EOF is the parent closing it.
+	if err := serve(os.Stdin, os.Stdout); !errors.Is(err, io.EOF) {
 		fmt.Fprintln(os.Stderr, "vakt ast worker:", err)
 		os.Exit(1)
 	}

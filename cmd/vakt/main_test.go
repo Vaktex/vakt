@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -324,5 +325,46 @@ func TestBarLine(t *testing.T) {
 	got := barLine(512<<20, 1<<30, 0, 80)
 	if !strings.Contains(got, " 50% 512.0 MB/1.00 GB") || !strings.HasPrefix(got, "summoning model ▕") {
 		t.Errorf("bar = %q", got)
+	}
+}
+
+// An interrupted scan exits 130 even though the cancellation surfaces as a
+// wrapped scan error.
+func TestInterruptExits130(t *testing.T) {
+	isolate(t)
+	dir := t.TempDir()
+	old := runScan
+	t.Cleanup(func() { runScan = old })
+	ctx, cancel := context.WithCancel(context.Background())
+	runScan = func(c context.Context, _ ScanOptions, _ *report.Progress) (*report.Report, error) {
+		cancel()
+		<-c.Done()
+		return nil, fmt.Errorf("pipeline: scoring 2 units: %w", c.Err())
+	}
+	var out, errb bytes.Buffer
+	if err := os.WriteFile(filepath.Join(dir, "m.safetensors"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if code := run(ctx, []string{"patrol", dir, "--no-color", "--model", filepath.Join(dir, "m.safetensors")}, strings.NewReader(""), &out, &errb); code != exitSignals {
+		t.Fatalf("exit %d, want %d; stderr %q", code, exitSignals, errb.String())
+	}
+	if !strings.Contains(errb.String(), "interrupted") {
+		t.Errorf("stderr %q", errb.String())
+	}
+}
+
+func TestDoctorStrict(t *testing.T) {
+	isolate(t)
+	oldCmd, oldLook, oldBench := commandOutput, lookPath, doctorBench
+	t.Cleanup(func() { commandOutput, lookPath, doctorBench = oldCmd, oldLook, oldBench })
+	commandOutput = func(context.Context, string, ...string) (string, error) { return "", errors.New("none") }
+	lookPath = func(string) (string, error) { return "", errors.New("none") }
+	var out, errb bytes.Buffer
+	if code := run(context.Background(), []string{"doctor", "--no-bench"}, strings.NewReader(""), &out, &errb); code != exitOK {
+		t.Fatalf("plain doctor exit %d", code)
+	}
+	out.Reset()
+	if code := run(context.Background(), []string{"doctor", "--no-bench", "--strict"}, strings.NewReader(""), &out, &errb); code != exitError {
+		t.Fatalf("strict doctor with warnings exit %d:\n%s", code, out.String())
 	}
 }

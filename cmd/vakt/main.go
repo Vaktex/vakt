@@ -59,16 +59,18 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 	if err == nil {
 		return exitOK
 	}
+	// An interrupt wins over whatever error the cancellation surfaced as
+	// (e.g. "scoring: context canceled"): scripts expect 130.
+	if ctx.Err() != nil {
+		fmt.Fprintf(stderr, "%s: interrupted\n", brand.Binary)
+		return exitSignals
+	}
 	var ee *exitCodeError
 	if errors.As(err, &ee) {
 		if ee.err != nil {
 			fmt.Fprintf(stderr, "%s: %v\n", brand.Binary, ee.err)
 		}
 		return ee.code
-	}
-	if ctx.Err() != nil {
-		fmt.Fprintf(stderr, "%s: interrupted\n", brand.Binary)
-		return exitSignals
 	}
 	fmt.Fprintf(stderr, "%s: %v\n", brand.Binary, err)
 	return exitError

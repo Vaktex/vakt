@@ -55,20 +55,31 @@ func (d *doctor) section(s string) { fmt.Fprintf(d.w, "\n%s\n", s) }
 func (d *doctor) warn(k, v string) { d.warns++; d.row(k, "! "+v) }
 
 func newDoctorCmd() *cobra.Command {
-	var noBench bool
+	var noBench, strict bool
 	cmd := &cobra.Command{
 		Use:   "doctor",
 		Short: "Check this machine, the engine and the model cache",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return runDoctor(cmd.Context(), cmd.OutOrStdout(), runtime.GOOS, !noBench)
+			warns, err := runDoctorCount(cmd.Context(), cmd.OutOrStdout(), runtime.GOOS, !noBench)
+			if err == nil && strict && warns > 0 {
+				return &exitCodeError{code: exitError} // message already printed
+			}
+			return err
 		},
 	}
 	cmd.Flags().BoolVar(&noBench, "no-bench", false, "skip the engine benchmark")
+	cmd.Flags().BoolVar(&strict, "strict", false, "exit 1 if any check needs attention (for scripts and CI)")
 	return cmd
 }
 
 func runDoctor(ctx context.Context, w io.Writer, goos string, bench bool) error {
+	_, err := runDoctorCount(ctx, w, goos, bench)
+	return err
+}
+
+// runDoctorCount runs the checks and returns how many need attention.
+func runDoctorCount(ctx context.Context, w io.Writer, goos string, bench bool) (int, error) {
 	d := &doctor{w: w}
 	fmt.Fprintf(w, "%s %s doctor\n", brand.Product, brand.Version)
 
@@ -127,7 +138,7 @@ func runDoctor(ctx context.Context, w io.Writer, goos string, bench bool) error 
 	} else {
 		fmt.Fprintf(w, "%d check%s need attention.\n", d.warns, plural(d.warns))
 	}
-	return nil
+	return d.warns, nil
 }
 
 func cpuName(ctx context.Context, goos string) string {

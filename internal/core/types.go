@@ -28,7 +28,7 @@ const (
 
 // CacheVersion is mixed into every cache key. Bump it whenever tokenization,
 // prompt rendering, pooling or head semantics change.
-const CacheVersion = "1"
+const CacheVersion = "2" // 2: prompt code is whitespace-trimmed as in training
 
 // Unit kinds.
 const (
