@@ -1,3 +1,16 @@
+diff --git a/mlx/backend/metal/CMakeLists.txt b/mlx/backend/metal/CMakeLists.txt
+index 67c6957..8e95a40 100644
+--- a/mlx/backend/metal/CMakeLists.txt
++++ b/mlx/backend/metal/CMakeLists.txt
+@@ -141,5 +141,6 @@ endif()
+ 
+ add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/kernels)
+ 
+-target_compile_definitions(mlx
+-                           PRIVATE METAL_PATH="${MLX_METAL_PATH}/mlx.metallib")
++# vakt: do not bake the absolute build path into the binary; the embedded
++# metallib is registered at runtime (see device.cpp).
++target_compile_definitions(mlx PRIVATE METAL_PATH="mlx.metallib")
 diff --git a/mlx/backend/metal/device.cpp b/mlx/backend/metal/device.cpp
 index 15824d6..fa5c8f3 100644
 --- a/mlx/backend/metal/device.cpp
