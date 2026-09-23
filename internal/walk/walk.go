@@ -146,6 +146,8 @@ type walker struct {
 	budget  atomic.Int64    // ignore patterns still allowed in this walk
 	meter   matchMeter      // ignore matching work still allowed in this walk
 	dry     bool            // budget probe: evaluate ignores only, no reads or output
+	ignMu   sync.Mutex
+	ignores map[string]*ignoreFile // parsed by the dry pass, reused by the real walk
 }
 
 // Walk walks root and sends every scannable file on out and every skipped
@@ -184,6 +186,7 @@ func Walk(ctx context.Context, root string, opts Options, out chan<- File, skipp
 		return fmt.Errorf("walk: %w", err)
 	}
 	defer fsRoot.Close()
+	var dryIgnores map[string]*ignoreFile
 	if !opts.NoRepoIgnores {
 		// The tree's ignore files decide what is hidden, under a work
 		// budget. A dry pass (no reads, nothing emitted) finds out whether
@@ -191,7 +194,9 @@ func Walk(ctx context.Context, root string, opts Options, out chan<- File, skipp
 		// so the result never depends on where or when the budget ran out.
 		dry := newWalker(ctx, real, fsRoot, opts, nil, nil)
 		dry.dry = true
+		dry.ignores = map[string]*ignoreFile{}
 		dry.run()
+		dryIgnores = dry.ignores
 		if dry.meter.out.Load() {
 			opts.NoRepoIgnores = true
 			if skipped != nil {
@@ -206,6 +211,9 @@ func Walk(ctx context.Context, root string, opts Options, out chan<- File, skipp
 		}
 	}
 	w := newWalker(ctx, real, fsRoot, opts, out, skipped)
+	if !opts.NoRepoIgnores {
+		w.ignores = dryIgnores
+	}
 	w.run()
 	return ctx.Err()
 }
@@ -551,6 +559,28 @@ func within(root, path string) bool {
 // through the Root with O_NONBLOCK and checks the opened handle, so neither
 // a symlink nor a FIFO swapped in after the Lstat can escape or block.
 func (w *walker) readIgnore(path, base string) *ignoreFile {
+	if w.ignores != nil && !w.dry {
+		// The real walk uses exactly the ignore files the dry pass read and
+		// metered, so a file rewritten between the passes cannot swap in
+		// costlier rules. Files the dry pass never saw are disregarded.
+		w.ignMu.Lock()
+		ig := w.ignores[path]
+		w.ignMu.Unlock()
+		if ig != nil && ig.truncated {
+			w.skip(path, ReasonIgnoreCap) // the dry pass cannot report
+		}
+		return ig
+	}
+	ig := w.readIgnoreFile(path, base)
+	if w.dry {
+		w.ignMu.Lock()
+		w.ignores[path] = ig
+		w.ignMu.Unlock()
+	}
+	return ig
+}
+
+func (w *walker) readIgnoreFile(path, base string) *ignoreFile {
 	st, err := w.fs.Lstat(path)
 	if err != nil || !st.Mode().IsRegular() {
 		return nil
@@ -569,6 +599,9 @@ func (w *walker) readIgnore(path, base string) *ignoreFile {
 	}
 	ig, truncated := parseIgnore(base, data, &w.budget)
 	if truncated {
+		if ig != nil {
+			ig.truncated = true
+		}
 		w.skip(path, ReasonIgnoreCap)
 	}
 	if w.budget.Load() < 0 {

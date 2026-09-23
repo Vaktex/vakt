@@ -29,6 +29,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"strings"
 	"sync"
 	"time"
 
@@ -45,6 +46,10 @@ const DefaultWorkerMemory = 1 << 30
 // maxWireBytes bounds any frame read from either side.
 const maxWireBytes = 64 << 20
 
+// maxConcurrentParses bounds simultaneous isolated parses (tree-sitter
+// parsing is fast; the cap only matters when hostile files pile up).
+const maxConcurrentParses = 4
+
 // ErrParseLimit is returned when an isolated parse exceeded its memory
 // budget or deadline and the worker was killed; the result is a whole-file
 // unit.
@@ -58,6 +63,18 @@ func MaybeServeWorker() {
 		return
 	}
 	limitSelf()
+	// Exit if the parent dies mid-parse (it would otherwise run to
+	// completion as an orphan): our parent pid changes when reparented.
+	ppid := os.Getppid()
+	go func() {
+		for {
+			time.Sleep(100 * time.Millisecond)
+			// Reparented (to init/launchd, or a subreaper) or born orphaned.
+			if p := os.Getppid(); p != ppid || p == 1 {
+				os.Exit(3)
+			}
+		}
+	}()
 	err := serve(os.Stdin, os.Stdout)
 	if err != nil && !errors.Is(err, io.EOF) {
 		fmt.Fprintln(os.Stderr, "vakt ast worker:", err)
@@ -161,6 +178,7 @@ func writeFrame(w io.Writer, b []byte) error {
 type Isolated struct {
 	exe    string
 	mem    int64
+	slots  chan struct{} // bounds concurrent isolated parses
 	mu     sync.Mutex
 	idle   []*worker
 	closed bool
@@ -184,7 +202,9 @@ func NewIsolated(memBytes int64) (*Isolated, error) {
 	if memBytes <= 0 {
 		memBytes = DefaultWorkerMemory
 	}
-	return &Isolated{exe: exe, mem: memBytes}, nil
+	// Memory can overshoot the budget between polls, so bound how many
+	// parses run at once (worst case ~slots x budget).
+	return &Isolated{exe: exe, mem: memBytes, slots: make(chan struct{}, maxConcurrentParses)}, nil
 }
 
 // Close stops all idle workers. Busy workers stop when their parse ends.
@@ -263,6 +283,12 @@ func (iso *Isolated) Extract(ctx context.Context, rel, lang string, src []byte, 
 	if grammarForFile(rel, lang) == nil || len(src) == 0 || pathological(lang, src) {
 		return Extract(ctx, rel, lang, src, opts)
 	}
+	select {
+	case iso.slots <- struct{}{}:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	defer func() { <-iso.slots }()
 	w, err := iso.get()
 	if err != nil {
 		return nil, err
@@ -294,7 +320,7 @@ func (iso *Isolated) Extract(ctx context.Context, rel, lang string, src []byte, 
 	// generous grace period bounds the whole request.
 	deadline := time.NewTimer(opts.ParseTimeout + 5*time.Second + time.Duration(len(src)/(64<<10))*time.Second)
 	defer deadline.Stop()
-	poll := time.NewTicker(50 * time.Millisecond)
+	poll := time.NewTicker(10 * time.Millisecond)
 	defer poll.Stop()
 	for {
 		select {
@@ -307,7 +333,14 @@ func (iso *Isolated) Extract(ctx context.Context, rel, lang string, src []byte, 
 				// The worker died (OOM-killed, crashed): contain it.
 				return []core.Unit{fileUnit(rel, lang, src)}, ErrParseLimit
 			}
-			iso.put(w)
+			// A worker that grew during a legitimate parse keeps that memory;
+			// reusing it would make the next file's fate depend on which
+			// worker it lands on. Retire it instead.
+			if rss, ok := processRSS(w.cmd.Process.Pid); !ok || rss > iso.mem/4 {
+				w.stop()
+			} else {
+				iso.put(w)
+			}
 			return rebuild(r.resp, rel, lang, src)
 		case <-poll.C:
 			if rss, ok := processRSS(w.cmd.Process.Pid); ok && rss > iso.mem {
@@ -366,13 +399,12 @@ func rebuild(resp response, rel, lang string, src []byte) ([]core.Unit, error) {
 // anything that would make the worker do more than parse (credentials are
 // not needed to parse).
 func workerEnv() []string {
+	// Allowlist: a parser needs nothing else (no credentials, no sockets).
 	var env []string
 	for _, kv := range os.Environ() {
-		switch {
-		case len(kv) >= len(WorkerEnv) && kv[:len(WorkerEnv)] == WorkerEnv:
-		case len(kv) > 9 && kv[:9] == "HF_TOKEN=":
-		case len(kv) > 21 && kv[:21] == "HUGGING_FACE_HUB_TOK":
-		default:
+		k, _, _ := strings.Cut(kv, "=")
+		switch k {
+		case "PATH", "HOME", "TMPDIR", "LANG", "LC_ALL", "LC_CTYPE", "GODEBUG", "GOMAXPROCS", "GOGC", "GOMEMLIMIT":
 			env = append(env, kv)
 		}
 	}

@@ -157,11 +157,35 @@ func pathological(lang string, src []byte) bool {
 			skipUntil = i + n
 			continue
 		}
+		// Operators built from < and > open or close nothing: arrows and
+		// comparisons (=> -> >= <=), shifts and C++ streams (<< >>).
+		// Counting their '>' would let `A<` pairs hide behind lambdas;
+		// counting their '<' flags every iostream-heavy file.
+		if (c == '>' || c == '<') && angleOperator(src, i) {
+			continue
+		}
 		if lexed.add(c) {
 			return true
 		}
 	}
 	return false
+}
+
+// angleOperator reports whether the '<' or '>' at src[i] is part of an
+// operator rather than a generic bracket.
+func angleOperator(src []byte, i int) bool {
+	prev, next := byte(0), byte(0)
+	if i > 0 {
+		prev = src[i-1]
+	}
+	if i+1 < len(src) {
+		next = src[i+1]
+	}
+	c := src[i]
+	if next == '=' || next == c || prev == c {
+		return true // <= >= << >> (and the second char of each)
+	}
+	return c == '>' && (prev == '=' || prev == '-')
 }
 
 // bracketCount tracks open ( [ { < with counts floored at zero.

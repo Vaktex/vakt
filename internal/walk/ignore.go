@@ -88,6 +88,7 @@ type ignoreFile struct {
 	pats         []ignorePattern
 	cost         int // sum of unanchored pattern rune lengths (work per base-name rune)
 	anchoredCost int // sum of anchored pattern rune lengths x segments (work per path rune)
+	truncated    bool
 }
 
 // ignoreChain is an immutable linked list of ignore files, deepest first.
