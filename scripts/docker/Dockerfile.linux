@@ -1,0 +1,50 @@
+# syntax=docker/dockerfile:1
+#
+# Linux release build for vakt. BACKEND=cuda (default) or cpu.
+#   docker buildx build -f scripts/docker/Dockerfile.linux \
+#     --platform linux/amd64 --build-arg BACKEND=cuda --output type=local,dest=dist .
+#
+# The CUDA image provides nvcc, cuBLAS, cuDNN 9 and NVRTC for CUDA 13. The
+# resulting binary links cudart statically and cuBLAS/cuDNN/NVRTC
+# dynamically, so hosts need the CUDA 13 runtime libraries and driver >= 580.
+
+ARG CUDA_IMAGE=nvidia/cuda:13.0.1-cudnn-devel-ubuntu24.04
+ARG CPU_IMAGE=ubuntu:24.04
+ARG BACKEND=cuda
+
+FROM ${CUDA_IMAGE} AS base-cuda
+FROM ${CPU_IMAGE} AS base-cpu
+
+FROM base-${BACKEND} AS build
+ARG BACKEND
+ARG GO_VERSION=1.27.1
+ARG GARBLE_VERSION=v0.18.0
+ARG VERSION=dev
+ARG COMMIT=none
+ENV DEBIAN_FRONTEND=noninteractive \
+    PATH=/usr/local/go/bin:/root/go/bin:/root/.cargo/bin:${PATH}
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      ca-certificates curl git build-essential cmake ninja-build ccache pkg-config \
+      libopenblas-dev liblapack-dev liblapacke-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN arch="$(dpkg --print-architecture)" \
+    && curl --proto '=https' --tlsv1.2 -fsSL "https://go.dev/dl/go${GO_VERSION}.linux-${arch}.tar.gz" -o /tmp/go.tgz \
+    && tar -C /usr/local -xzf /tmp/go.tgz && rm /tmp/go.tgz \
+    && curl --proto '=https' --tlsv1.2 -fsSL https://sh.rustup.rs | sh -s -- -y --profile minimal \
+    && go install "mvdan.cc/garble@${GARBLE_VERSION}"
+
+WORKDIR /src
+COPY go.mod go.sum* ./
+RUN go mod download
+COPY . .
+
+RUN --mount=type=cache,target=/root/.cache/ccache \
+    --mount=type=cache,target=/root/.cache/go-build \
+    make deps BACKEND=${BACKEND} \
+    && make prod BACKEND=${BACKEND} VERSION=${VERSION} COMMIT=${COMMIT} \
+    && make audit BACKEND=${BACKEND}
+
+FROM scratch AS out
+COPY --from=build /src/dist/ /
