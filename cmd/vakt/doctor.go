@@ -110,9 +110,13 @@ func runDoctor(ctx context.Context, w io.Writer, goos string, bench bool) error 
 		d.warn("status", "not cached (run `"+brand.Binary+" summon`)")
 	}
 	if _, ok := hub.ResolveToken(hub.Options{}); ok {
-		d.row("hf token", "yes")
-	} else if os.Getenv("HF_TOKEN") != "" {
-		d.row("hf token", "yes")
+		src := "token file"
+		if os.Getenv("HF_TOKEN") != "" {
+			src = "HF_TOKEN"
+		} else if os.Getenv("HUGGING_FACE_HUB_TOKEN") != "" {
+			src = "HUGGING_FACE_HUB_TOKEN"
+		}
+		d.row("hf token", "yes ("+src+")")
 	} else {
 		d.row("hf token", "no (needed to download the private model; set HF_TOKEN or run `hf auth login`)")
 	}

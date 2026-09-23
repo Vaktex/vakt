@@ -17,6 +17,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/vaktex/vakt/internal/brand"
 )
@@ -506,5 +507,68 @@ func TestCacheDirEnv(t *testing.T) {
 	t.Setenv("VAKT_CACHE", "")
 	if !strings.HasSuffix(CacheDir(), filepath.Join("vakt", "hub")) {
 		t.Errorf("default cache dir = %s", CacheDir())
+	}
+}
+
+// A hub that accepts the connection but never answers must not hang Resolve:
+// the HEAD deadline fires and, with a cached snapshot, the cache is used.
+func TestHungHubFallsBackToCache(t *testing.T) {
+	clearEnv(t)
+	f := newFakeHub(t, 2048)
+	o := f.opts(t)
+	if _, _, err := Resolve(context.Background(), o); err != nil {
+		t.Fatal(err)
+	}
+	block := make(chan struct{})
+	t.Cleanup(func() { close(block) })
+	hung := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-block:
+		case <-r.Context().Done():
+		}
+	}))
+	t.Cleanup(hung.Close)
+	old := headTimeout
+	headTimeout = 300 * time.Millisecond
+	t.Cleanup(func() { headTimeout = old })
+	o.Endpoint = hung.URL
+	start := time.Now()
+	path, sha, err := Resolve(context.Background(), o)
+	if err != nil || path == "" || sha != f.sha {
+		t.Fatalf("Resolve = %q %q %v, want cached fallback", path, sha, err)
+	}
+	if d := time.Since(start); d > 5*time.Second {
+		t.Fatalf("took %s; HEAD deadline not applied", d)
+	}
+}
+
+// A CDN that stalls mid-body trips the idle watchdog instead of hanging.
+func TestStalledDownloadTimesOut(t *testing.T) {
+	clearEnv(t)
+	f := newFakeHub(t, 4096)
+	block := make(chan struct{})
+	t.Cleanup(func() { close(block) })
+	stall := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Length", strconv.Itoa(len(f.blob)))
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(f.blob[:100])
+		w.(http.Flusher).Flush()
+		select {
+		case <-block:
+		case <-r.Context().Done():
+		}
+	}))
+	t.Cleanup(stall.Close)
+	f.getRedirect = stall.URL + "/blob"
+	old := idleTimeout
+	idleTimeout = 300 * time.Millisecond
+	t.Cleanup(func() { idleTimeout = old })
+	start := time.Now()
+	_, _, err := Resolve(context.Background(), f.opts(t))
+	if err == nil || !strings.Contains(err.Error(), "stalled") {
+		t.Fatalf("err = %v, want stalled", err)
+	}
+	if d := time.Since(start); d > 10*time.Second {
+		t.Fatalf("took %s", d)
 	}
 }

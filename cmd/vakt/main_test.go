@@ -7,6 +7,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -236,7 +237,9 @@ func TestDemoJSONAndReportCmd(t *testing.T) {
 func TestVersion(t *testing.T) {
 	for _, args := range [][]string{{"version"}, {"--version"}} {
 		code, out, _ := runCLI(t, "", args...)
-		if code != 0 || !strings.Contains(out, brand.Product) || !strings.Contains(out, brand.ModelRepo) || !strings.Contains(out, "backend  "+brand.Backend) {
+		first, _, _ := strings.Cut(out, "\n")
+		if code != 0 || !strings.Contains(out, brand.Product) || !strings.Contains(out, brand.ModelRepo) ||
+			!regexp.MustCompile(`version=[^ ]+ commit=[^ ]+ backend=[^ ]+`).MatchString(first) {
 			t.Errorf("%v: %d %q", args, code, out)
 		}
 	}

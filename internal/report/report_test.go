@@ -424,3 +424,18 @@ func jsonString(s string) string {
 	b, _ := json.Marshal(s)
 	return string(b)
 }
+
+func TestReadJSONRejectsOutOfRangeScores(t *testing.T) {
+	for _, doc := range []string{
+		`{"schema_version":"1","units":[{"file":"a.c","severity":1e9,"families":{}}]}`,
+		`{"schema_version":"1","units":[{"file":"a.c","severity":-0.1,"families":{}}]}`,
+		`{"schema_version":"1","units":[{"file":"a.c","severity":0.5,"top_family_prob":2,"families":{}}]}`,
+		`{"schema_version":"1","units":[{"file":"a.c","severity":0.5,"families":{"web_security":3}}]}`,
+		`{"schema_version":"1","units":[],"files":[{"file":"a.c","max_severity":7}]}`,
+		`{"schema_version":"1","units":[],"summary":{"threshold":5}}`,
+	} {
+		if _, err := ReadJSON(strings.NewReader(doc)); err == nil || !strings.Contains(err.Error(), "outside [0,1]") {
+			t.Errorf("%s: err = %v", doc, err)
+		}
+	}
+}

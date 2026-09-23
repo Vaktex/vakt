@@ -145,16 +145,43 @@ func ReadJSON(r io.Reader) (*Report, error) {
 	// top_family is rendered verbatim in several places; a report read from
 	// disk is untrusted, so it must name a known family (or be empty).
 	for i := range rep.Units {
-		if err := checkFamily(rep.Units[i].TopFamily); err != nil {
+		u := &rep.Units[i]
+		if err := checkFamily(u.TopFamily); err != nil {
 			return nil, fmt.Errorf("unit %d: %w", i, err)
 		}
-		for j := range rep.Units[i].Parts {
-			if err := checkFamily(rep.Units[i].Parts[j].TopFamily); err != nil {
+		if err := checkProbs(u.Severity, u.TopFamilyProb, u.Families[:]...); err != nil {
+			return nil, fmt.Errorf("unit %d: %w", i, err)
+		}
+		for j := range u.Parts {
+			p := &u.Parts[j]
+			if err := checkFamily(p.TopFamily); err != nil {
+				return nil, fmt.Errorf("unit %d part %d: %w", i, j, err)
+			}
+			if err := checkProbs(p.Severity, p.TopFamilyProb); err != nil {
 				return nil, fmt.Errorf("unit %d part %d: %w", i, j, err)
 			}
 		}
 	}
+	for i := range rep.Files {
+		if err := checkProbs(rep.Files[i].MaxSeverity, 0); err != nil {
+			return nil, fmt.Errorf("file %d: %w", i, err)
+		}
+	}
+	if err := checkProbs(rep.Summary.Threshold, 0); err != nil {
+		return nil, fmt.Errorf("summary: %w", err)
+	}
 	return &rep, nil
+}
+
+// checkProbs rejects scores outside [0,1]: every score in a report is a
+// sigmoid output, and out-of-range values would skew --fail-on and filters.
+func checkProbs(sev, top float64, fams ...float64) error {
+	for _, v := range append([]float64{sev, top}, fams...) {
+		if v < 0 || v > 1 {
+			return fmt.Errorf("score %g is outside [0,1]", v)
+		}
+	}
+	return nil
 }
 
 func checkFamily(name string) error {

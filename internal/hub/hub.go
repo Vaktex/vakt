@@ -72,7 +72,7 @@ func CacheDir() string {
 	if err != nil {
 		d = os.TempDir()
 	}
-	return filepath.Join(d, "vakt", "hub")
+	return filepath.Join(d, brand.Binary, "hub")
 }
 
 // ValidateRepo checks a repo id of the form owner/name.
@@ -170,7 +170,7 @@ func prepare(o Options) (*resolved, error) {
 	r := &resolved{o: o, endpoint: ep}
 	r.token, _ = ResolveToken(o)
 	r.repoDir = filepath.Join(o.CacheDir, "models--"+strings.ReplaceAll(o.Repo, "/", "--"))
-	base := http.DefaultClient
+	base := defaultClient
 	if o.HTTPClient != nil {
 		base = o.HTTPClient
 	}
@@ -344,6 +344,11 @@ func (r *resolved) newRequest(ctx context.Context, method, u string) (*http.Requ
 // are on the redirect response itself). Relative redirects (renamed repos)
 // are followed on the same host.
 func (r *resolved) head(ctx context.Context) (fileMeta, error) {
+	// Metadata requests are small: a hung hub must fail fast so the cached
+	// snapshot fallback can kick in.
+	parent := ctx
+	ctx, cancel := context.WithTimeout(ctx, headTimeout)
+	defer cancel()
 	u := r.fileURL(r.o.Revision)
 	noFollow := *r.client
 	noFollow.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
@@ -354,8 +359,11 @@ func (r *resolved) head(ctx context.Context) (fileMeta, error) {
 		}
 		resp, err := noFollow.Do(req)
 		if err != nil {
-			if ctx.Err() != nil {
-				return fileMeta{}, ctx.Err()
+			if parent.Err() != nil { // the caller cancelled
+				return fileMeta{}, parent.Err()
+			}
+			if ctx.Err() != nil { // our deadline: a network failure, so the cache may serve
+				return fileMeta{}, netError{fmt.Errorf("hub did not respond within %s", headTimeout)}
 			}
 			return fileMeta{}, netError{stripURLError(err)}
 		}
@@ -499,6 +507,12 @@ func (r *resolved) fetch(ctx context.Context, m fileMeta, f *os.File, have *int6
 	if *have > 0 {
 		req.Header.Set("Range", fmt.Sprintf("bytes=%d-", *have))
 	}
+	// The body read below has an idle watchdog: any stall longer than
+	// idleTimeout cancels the request (a whole-download deadline would kill
+	// slow but healthy multi-GB transfers).
+	dctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	req = req.WithContext(dctx)
 	resp, err := r.client.Do(req)
 	if err != nil {
 		if ctx.Err() != nil {
@@ -537,8 +551,11 @@ func (r *resolved) fetch(ctx context.Context, m fileMeta, f *os.File, have *int6
 	}
 	body := io.LimitReader(resp.Body, m.size-*have+1)
 	buf := make([]byte, chunk)
+	idle := time.AfterFunc(idleTimeout, cancel)
+	defer idle.Stop()
 	for {
 		n, rerr := body.Read(buf)
+		idle.Reset(idleTimeout)
 		if n > 0 {
 			if *have+int64(n) > m.size {
 				return errors.New("hub sent more data than the advertised size")
@@ -556,8 +573,11 @@ func (r *resolved) fetch(ctx context.Context, m fileMeta, f *os.File, have *int6
 			return nil
 		}
 		if rerr != nil {
-			if ctx.Err() != nil {
+			if ctx.Err() != nil { // the caller cancelled
 				return ctx.Err()
+			}
+			if dctx.Err() != nil { // the idle watchdog fired
+				return netError{fmt.Errorf("download stalled for %s", idleTimeout)}
 			}
 			return netError{rerr}
 		}
@@ -705,3 +725,21 @@ func printable(s string) string {
 	}
 	return b.String()
 }
+
+// Network timeouts. Variables so tests can shorten them.
+var (
+	headTimeout = 30 * time.Second
+	idleTimeout = 60 * time.Second
+)
+
+// defaultClient bounds connection setup and time-to-first-byte; the body has
+// an idle watchdog instead of an overall deadline.
+var defaultClient = &http.Client{Transport: &http.Transport{
+	Proxy:                 http.ProxyFromEnvironment,
+	DialContext:           (&net.Dialer{Timeout: 15 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
+	TLSHandshakeTimeout:   15 * time.Second,
+	ResponseHeaderTimeout: 30 * time.Second,
+	ExpectContinueTimeout: time.Second,
+	IdleConnTimeout:       90 * time.Second,
+	ForceAttemptHTTP2:     true,
+}}
