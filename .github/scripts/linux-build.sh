@@ -12,7 +12,7 @@ export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
 apt-get install -y -qq --no-install-recommends \
 	ca-certificates curl git build-essential ninja-build ccache pkg-config \
-	libopenblas-dev liblapack-dev liblapacke-dev >/dev/null
+	libopenblas-dev liblapack-dev liblapacke-dev unzip >/dev/null
 
 arch=$(dpkg --print-architecture)
 tarball="go${GO_VERSION}.linux-${arch}.tar.gz"
