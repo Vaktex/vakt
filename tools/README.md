@@ -95,8 +95,10 @@ This loads the mock into a freshly built `QwenClassifier` with
 `load_state_dict(strict=True)`. It runs in float32 and eval mode (no
 dropout). The scores come from `model.encode` + `model._heads`:
 
-`last_hidden_state` → masked mean pool (float32) → `binary_head` → sigmoid =
-severity, and `auxiliary_head` → sigmoid = 18 family probabilities.
+`last_hidden_state` → 4-head attention pool (float32: keys/values without
+bias, scores masked to -1e4 before the softmax, project + LayerNorm) →
+`binary_head` / `auxiliary_head` MLPs (LayerNorm → Linear → exact GELU →
+Linear) → sigmoid = severity and 18 family probabilities.
 
 Tokenisation is `experiment.encoding.encode`, the loader's own call:
 `AutoTokenizer(use_fast=True)`, no BOS, truncation at 16384, and right

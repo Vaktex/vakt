@@ -43,6 +43,8 @@ const (
 	domVocab         = 248320
 	domIntermediate  = 3584
 	domAuxClasses    = 18
+	domPoolHeads     = 4
+	domHeadInner     = 2 * domHidden
 	// BackbonePrefix is the tensor-name prefix of the published DOM model.
 	BackbonePrefix = "backbone."
 	// BaseModelPrefix is the prefix of the Qwen3.5-0.8B base checkpoint.
@@ -91,10 +93,27 @@ func DOMExpectations(prefix string) []Expect {
 		}
 	}
 	if prefix == BackbonePrefix {
-		add("binary_head.weight", 1, domHidden)
-		add("binary_head.bias", 1)
-		add("auxiliary_head.weight", domAuxClasses, domHidden)
-		add("auxiliary_head.bias", domAuxClasses)
+		// Attention pooling: 4 learned queries of head_dim 256.
+		add("pool.query", domPoolHeads, domHidden/domPoolHeads)
+		add("pool.key.weight", domHidden, domHidden)
+		add("pool.value.weight", domHidden, domHidden)
+		add("pool.project.weight", domHidden, domHidden)
+		add("pool.project.bias", domHidden)
+		add("pool.norm.weight", domHidden)
+		add("pool.norm.bias", domHidden)
+		// MLP heads: LayerNorm (net.0) -> Linear (net.1) -> GELU -> Dropout
+		// -> Linear (net.4).
+		for _, h := range []struct {
+			name string
+			out  int64
+		}{{"binary_head", 1}, {"auxiliary_head", domAuxClasses}} {
+			add(h.name+".net.0.weight", domHidden)
+			add(h.name+".net.0.bias", domHidden)
+			add(h.name+".net.1.weight", domHeadInner, domHidden)
+			add(h.name+".net.1.bias", domHeadInner)
+			add(h.name+".net.4.weight", h.out, domHeadInner)
+			add(h.name+".net.4.bias", h.out)
+		}
 	}
 	return out
 }

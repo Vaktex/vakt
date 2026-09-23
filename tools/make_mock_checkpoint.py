@@ -8,21 +8,36 @@ base weights, re-initialises the two heads deterministically, and saves it with
 
 Head initialisation
 -------------------
-Pooled vectors from the base backbone have norms around 80 and share a large
-common component (mean-vector norm ~75). Plain random heads therefore give
-logits dominated by that shared direction, so every sample scores about the
-same. To get scores that are spread out and not saturated:
+The heads are two-layer MLPs (LayerNorm -> Linear -> GELU -> Dropout ->
+Linear), not the single `nn.Linear` they used to be, and pooling is a
+learned 4-head attention layer rather than a masked mean. Both are
+initialised here.
 
-* weights are drawn from N(0, HEAD_STD^2) under `torch.manual_seed(1234)`;
-* each bias is set to minus the head's response to the mean pooled vector of
-  a fixed calibration set, so the logits are centred near zero and what
-  remains is the sample-dependent part.
+Pooled vectors from the base backbone share a large common component, so
+plain random heads give logits dominated by that shared direction and every
+sample scores about the same. To get scores that are spread out and not
+saturated:
+
+* every `Linear` in each head is drawn from N(0, HEAD_STD^2) under
+  `torch.manual_seed(1234)`, and the LayerNorm is left at its identity
+  init so the head sees the pooled vector at unit scale;
+* the *final* layer's bias is set to minus that head's response to the mean
+  pooled vector of a fixed calibration set, so the logits are centred near
+  zero and what remains is the sample-dependent part. Only the final bias
+  can do this: it is the one that shifts the output directly.
+
+The pooling layer is initialised first and held fixed across both, because
+the calibration pooled vectors depend on it.
+
+The contrastive projection head is *not* initialised or saved: it exists
+only for the training loss and `experiment.publish` strips it from the
+published checkpoint. What this mock contains is exactly what ships.
 
 The calibration run is deterministic (CPU, float32, fixed inputs).
 
-`--dtype bf16` casts the backbone (only) to bfloat16 before saving; the heads
-stay float32, matching a CUDA publish where the backbone was loaded bf16 and
-the heads were created as float32 `nn.Linear`s.
+`--dtype bf16` casts the backbone (only) to bfloat16 before saving; the
+pooling layer and the heads stay float32, matching a CUDA publish where the
+backbone was loaded bf16 and everything above it was created float32.
 """
 
 import argparse
@@ -34,12 +49,17 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import torch  # noqa: E402
 from safetensors import safe_open  # noqa: E402
-from safetensors.torch import save_model  # noqa: E402
+from safetensors.torch import save_file  # noqa: E402
 
 from _common import MOCK_BF16, MOCK_FP32, build_classifier, sha256_file  # noqa: E402
 
 SEED = 1234
-HEAD_STD = 0.05
+# Two-layer heads compose their weights, so the per-layer scale that gives a
+# usable logit spread is smaller than the 0.05 a single Linear needed.
+HEAD_STD = 0.02
+# Pooling weights. The attention scores are scaled by 1/sqrt(head_dim)
+# inside the layer, so this only has to avoid saturating the softmax.
+POOL_STD = 0.02
 
 CALIBRATION = [
     ("Python", "def run(cmd):\n    os.system(cmd)"),
@@ -70,13 +90,48 @@ def calibration_pooled(model, tokenizer):
     return torch.stack(pooled)
 
 
+def linear_layers(head):
+    """The `nn.Linear`s inside an `MLPHead`, in order."""
+    return [m for m in head.net if isinstance(m, torch.nn.Linear)]
+
+
+def reinit_pool(model):
+    """Deterministic pooling weights.
+
+    Done before calibration because every pooled vector depends on these.
+    """
+    torch.manual_seed(SEED)
+
+    with torch.no_grad():
+        model.pool.query.normal_(0.0, POOL_STD)
+
+        for module in (model.pool.key, model.pool.value, model.pool.project):
+            module.weight.normal_(0.0, POOL_STD)
+
+            if module.bias is not None:
+                module.bias.zero_()
+
+
 def reinit_heads(model, pooled):
+    """Deterministic head weights, centred on the calibration set.
+
+    Each head is an MLP, so 'centre the output' means setting the bias of
+    the *final* layer: it is the only one that shifts the logit directly.
+    The earlier layers are randomised and then held, and the head's own
+    response to the mean pooled vector is measured through them.
+    """
     torch.manual_seed(SEED)
 
     with torch.no_grad():
         for head in (model.binary_head, model.auxiliary_head):
-            head.weight.normal_(0.0, HEAD_STD)
-            head.bias.copy_(-(pooled.mean(0) @ head.weight.T))
+            for layer in linear_layers(head):
+                layer.weight.normal_(0.0, HEAD_STD)
+                layer.bias.zero_()
+
+            # Measured through the whole head, in eval mode so dropout is
+            # off, then subtracted at the output.
+            final = linear_layers(head)[-1]
+            final.bias.copy_(-head(pooled.mean(0, keepdim=True)).squeeze(0))
 
 
 def main():
@@ -93,6 +148,8 @@ def main():
     model.eval()
     tokenizer = load_tokenizer(config)
 
+    # Pooling first: the calibration vectors are produced by it.
+    reinit_pool(model)
     pooled = calibration_pooled(model, tokenizer)
     reinit_heads(model, pooled)
 
@@ -114,7 +171,18 @@ def main():
         model.backbone.to(torch.bfloat16)
 
     out.parent.mkdir(parents=True, exist_ok=True)
-    save_model(model, str(out))
+
+    # Save the published tensor set, not the training one: the contrastive
+    # projection is dropped here exactly as `experiment.publish` drops it,
+    # so the mock and the real checkpoint have identical keys.
+    from experiment.publish import TRAINING_ONLY_PREFIXES
+
+    state = {
+        name: tensor
+        for name, tensor in model.state_dict().items()
+        if not name.startswith(TRAINING_ONLY_PREFIXES)
+    }
+    save_file(state, str(out))
 
     dtypes = collections.Counter()
 

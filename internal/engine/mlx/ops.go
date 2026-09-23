@@ -41,6 +41,51 @@ func (x *Ctx) Sigmoid(a *Array) *Array  { return x.unary("sigmoid", fSigmoid, a)
 func (x *Ctx) Negative(a *Array) *Array { return x.unary("negative", fNeg, a) }
 func (x *Ctx) Square(a *Array) *Array   { return x.unary("square", fSquare, a) }
 
+func (x *Ctx) Erf(a *Array) *Array { return x.unary("erf", fErf, a) }
+
+// Gelu is the exact (erf) GELU, matching PyTorch nn.GELU() defaults:
+// 0.5 * x * (1 + erf(x / sqrt(2))).
+func (x *Ctx) Gelu(a *Array) *Array {
+	dt := a.Dtype()
+	half := x.AsType(x.Scalar(0.5), dt)
+	inv := x.AsType(x.Scalar(float32(0.7071067811865476)), dt)
+	one := x.AsType(x.Scalar(1), dt)
+	return x.Multiply(x.Multiply(half, a), x.Add(one, x.Erf(x.Multiply(a, inv))))
+}
+
+// Softmax over one axis, computed in full precision.
+func (x *Ctx) Softmax(a *Array, axis int) *Array {
+	if !x.ok("softmax", a) {
+		return x.empty()
+	}
+	res := C.mlx_array_new()
+	if !x.check("softmax", C.mlx_softmax_axis(&res, a.c, cint(axis), true, x.S.c)) {
+		C.mlx_array_free(res)
+		return x.empty()
+	}
+	return x.track(res)
+}
+
+// LayerNorm over the last axis with optional weight and bias.
+func (x *Ctx) LayerNorm(a, w, b *Array, eps float32) *Array {
+	if !x.ok("layer_norm", a) || (w != nil && !x.ok("layer_norm", w)) || (b != nil && !x.ok("layer_norm", b)) {
+		return x.empty()
+	}
+	wc, bc := C.vakt_null_array(), C.vakt_null_array()
+	if w != nil {
+		wc = w.c
+	}
+	if b != nil {
+		bc = b.c
+	}
+	res := C.mlx_array_new()
+	if !x.check("layer_norm", C.mlx_fast_layer_norm(&res, a.c, wc, bc, C.float(eps), x.S.c)) {
+		C.mlx_array_free(res)
+		return x.empty()
+	}
+	return x.track(res)
+}
+
 // Silu is x * sigmoid(x).
 func (x *Ctx) Silu(a *Array) *Array { return x.Multiply(a, x.Sigmoid(a)) }
 
@@ -458,5 +503,6 @@ func fExp(r *C.mlx_array, a C.mlx_array, s C.mlx_stream) C.int     { return C.ml
 func fLog(r *C.mlx_array, a C.mlx_array, s C.mlx_stream) C.int     { return C.mlx_log(r, a, s) }
 func fLog1p(r *C.mlx_array, a C.mlx_array, s C.mlx_stream) C.int   { return C.mlx_log1p(r, a, s) }
 func fSigmoid(r *C.mlx_array, a C.mlx_array, s C.mlx_stream) C.int { return C.mlx_sigmoid(r, a, s) }
+func fErf(r *C.mlx_array, a C.mlx_array, s C.mlx_stream) C.int     { return C.mlx_erf(r, a, s) }
 func fNeg(r *C.mlx_array, a C.mlx_array, s C.mlx_stream) C.int     { return C.mlx_negative(r, a, s) }
 func fSquare(r *C.mlx_array, a C.mlx_array, s C.mlx_stream) C.int  { return C.mlx_square(r, a, s) }

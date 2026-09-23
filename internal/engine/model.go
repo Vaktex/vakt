@@ -34,16 +34,35 @@ const (
 
 func isFull(layer int) bool { return layer%fullInterval == fullInterval-1 }
 
+// poolW is AttentionPool (experiment/pooling.py), all float32.
+type poolW struct {
+	query  *mlx.Array // [4, 256]
+	keyT   *mlx.Array // [H, H] (transposed, no bias)
+	valueT *mlx.Array // [H, H] (transposed, no bias)
+	projT  *mlx.Array // [H, H] (transposed)
+	projB  *mlx.Array // [H]
+	normW  *mlx.Array // [H]
+	normB  *mlx.Array // [H]
+}
+
+// headW is MLPHead (experiment/heads.py), all float32:
+// LayerNorm -> Linear -> GELU(erf) -> Dropout(identity) -> Linear.
+type headW struct {
+	lnW, lnB *mlx.Array // [H]
+	w1T, b1  *mlx.Array // [H, 2H], [2H]
+	w2T, b2  *mlx.Array // [2H, out], [out]
+}
+
 // weights holds the model tensors in their compute dtype, with the fused and
 // transposed layouts the forward uses.
 type weights struct {
 	embed   *mlx.Array // [V, H]
 	norm    *mlx.Array // [H] (1+w applied)
 	layers  []layerW
-	binW    *mlx.Array // [H, 1] f32
-	binB    *mlx.Array // [1]
-	auxW    *mlx.Array // [H, 18] f32
-	auxB    *mlx.Array // [18]
+	pool    poolW
+	bin     headW // severity (1 output)
+	aux     headW // CWE families (18 outputs)
+	heads   bool
 	all     []*mlx.Array
 	compute mlx.DType
 }
@@ -161,10 +180,25 @@ func loadWeights(x *mlx.Ctx, raw map[string]*mlx.Array, prefix string, compute m
 		}
 	}
 	if heads {
-		w.binW = keep(x.Contiguous(x.Transpose(f32(get("binary_head.weight")), 1, 0)))
-		w.binB = keep(f32(get("binary_head.bias")))
-		w.auxW = keep(x.Contiguous(x.Transpose(f32(get("auxiliary_head.weight")), 1, 0)))
-		w.auxB = keep(f32(get("auxiliary_head.bias")))
+		// Pooling and heads stay float32 in every precision mode (the Python
+		// side forces fp32 here: at 16k tokens a bf16 softmax keeps only 7%
+		// of attention weights distinct).
+		t32 := func(name string) *mlx.Array { return keep(x.Contiguous(x.Transpose(f32(get(name)), 1, 0))) }
+		v32 := func(name string) *mlx.Array { return keep(f32(get(name))) }
+		w.pool = poolW{
+			query: v32("pool.query"), keyT: t32("pool.key.weight"), valueT: t32("pool.value.weight"),
+			projT: t32("pool.project.weight"), projB: v32("pool.project.bias"),
+			normW: v32("pool.norm.weight"), normB: v32("pool.norm.bias"),
+		}
+		head := func(p string) headW {
+			return headW{
+				lnW: v32(p + ".net.0.weight"), lnB: v32(p + ".net.0.bias"),
+				w1T: t32(p + ".net.1.weight"), b1: v32(p + ".net.1.bias"),
+				w2T: t32(p + ".net.4.weight"), b2: v32(p + ".net.4.bias"),
+			}
+		}
+		w.bin, w.aux = head("binary_head"), head("auxiliary_head")
+		w.heads = true
 	}
 	if err := x.Eval(w.all...); err != nil {
 		return nil, err

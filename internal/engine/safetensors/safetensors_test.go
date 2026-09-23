@@ -403,9 +403,9 @@ func TestRequireErrors(t *testing.T) {
 func TestDOMExpectations(t *testing.T) {
 	bb := DOMExpectations(BackbonePrefix)
 	base := DOMExpectations(BaseModelPrefix)
-	// 2 + 24*5 + 18 linear*9 + 6 full*6 (+ 4 heads)
-	if len(bb) != 324 || len(base) != 320 {
-		t.Fatalf("len = %d/%d, want 324/320", len(bb), len(base))
+	// 2 + 24*5 + 18 linear*9 + 6 full*6 (+ 7 pool + 2x6 MLP-head tensors)
+	if len(bb) != 339 || len(base) != 320 {
+		t.Fatalf("len = %d/%d, want 339/320", len(bb), len(base))
 	}
 	names := map[string]Expect{}
 	for _, e := range bb {
@@ -416,8 +416,9 @@ func TestDOMExpectations(t *testing.T) {
 		if !slices.Equal(e.DTypes, []DType{F32, BF16, F16}) {
 			t.Errorf("%q dtypes %v", e.Name, e.DTypes)
 		}
-		if strings.Contains(e.Name, "_head.") == strings.HasPrefix(e.Name, BackbonePrefix) {
-			t.Errorf("%q: heads must be unprefixed, everything else prefixed", e.Name)
+		head := strings.Contains(e.Name, "_head.") || strings.HasPrefix(e.Name, "pool.")
+		if head == strings.HasPrefix(e.Name, BackbonePrefix) {
+			t.Errorf("%q: pool/heads must be unprefixed, everything else prefixed", e.Name)
 		}
 	}
 	for i := range 24 {
@@ -433,8 +434,12 @@ func TestDOMExpectations(t *testing.T) {
 		"backbone.layers.0.linear_attn.conv1d.weight":       {6144, 1, 4},
 		"backbone.layers.23.self_attn.o_proj.weight":        {1024, 2048},
 		"backbone.layers.5.mlp.down_proj.weight":            {1024, 3584},
-		"auxiliary_head.weight":                             {18, 1024},
-		"binary_head.bias":                                  {1},
+		"auxiliary_head.net.4.weight":                       {18, 2048},
+		"auxiliary_head.net.1.weight":                       {2048, 1024},
+		"binary_head.net.4.bias":                            {1},
+		"binary_head.net.0.weight":                          {1024},
+		"pool.query":                                        {4, 256},
+		"pool.project.bias":                                 {1024},
 		"backbone.layers.22.linear_attn.in_proj_qkv.weight": {6144, 1024},
 	} {
 		if e, ok := names[name]; !ok || !slices.Equal(e.Shape, shape) {
@@ -514,7 +519,7 @@ const (
 	mockF32Path   = realModelsDir + "/Harness/testdata/models/mock-dom-0.8b/model.safetensors"
 	mockBF16Path  = realModelsDir + "/Harness/testdata/models/mock-dom-0.8b-bf16/model.safetensors"
 	basePath      = realModelsDir + "/Qwen3.5-0.8B-Base/model.safetensors-00001-of-00001.safetensors"
-	mockF32SHA256 = "50ea15ec0fb1e1fc44e06ecc02f880d09b4ad98c302e9a0b8d155f921773b719"
+	mockF32SHA256 = "9c49bbeeaadd7faf70b48c1516a741dae8a70f223af0182114ffd0cbf0213d94"
 )
 
 func requireFile(tb testing.TB, path string) {
@@ -539,7 +544,8 @@ func TestRealFiles(t *testing.T) {
 		{"mock-dom-0.8b bf16", mockBF16Path, BackbonePrefix, func(t *testing.T, h *Header) {
 			for n, tn := range h.Tensors {
 				want := BF16
-				if strings.Contains(n, "_head.") {
+				// Pooling and heads are published in float32.
+				if strings.Contains(n, "_head.") || strings.HasPrefix(n, "pool.") {
 					want = F32
 				}
 				if tn.DType != want {

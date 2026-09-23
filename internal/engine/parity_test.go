@@ -123,9 +123,28 @@ func TestParityLayers(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	pooled, got, err := e.pooledForTest(ids)
+	pooled, got, pw, err := e.poolForTest(ids)
 	if err != nil {
 		t.Fatal(err)
+	}
+	// Pool weights first: they isolate the pooling step from the backbone.
+	if refW, ok := ref["pool_weights"]; ok {
+		wantW, err := x.Float32s(refW)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(pw) != len(wantW) {
+			t.Fatalf("pool weights: %d, want %d", len(pw), len(wantW))
+		}
+		var maxW, sum float64
+		for i := range pw {
+			maxW = math.Max(maxW, math.Abs(float64(pw[i]-wantW[i])))
+			sum += float64(pw[i])
+		}
+		t.Logf("pool weights max|Δ| = %.3g (sum %.6f)", maxW, sum)
+		if maxW > 1e-4 || math.Abs(sum-1) > 1e-5 {
+			t.Fatalf("pool weights max|Δ| %.3g (sum %.6f)", maxW, sum)
+		}
 	}
 	var maxErr float64
 	for i := range got {

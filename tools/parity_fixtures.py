@@ -168,10 +168,14 @@ def long_code(tokenizer, language, files, target_tokens):
 
 
 def build_samples(tokenizer):
-    samples = [dict(name=n, language=l, code=c) for n, l, c in SAMPLES]
+    # Training-form code: every snippet in the training corpus has no
+    # leading/trailing whitespace (str.strip() is a no-op on all 1.1M rows),
+    # and the Go pipeline trims units the same way (tokenize.PromptCode).
+    samples = [dict(name=n, language=l, code=c.strip()) for n, l, c in SAMPLES]
 
     for (name, target), (language, files) in zip(LONG_TARGETS, LONG_SOURCES):
-        samples.append(dict(name=name, language=language, code=long_code(tokenizer, language, files, target)))
+        code = long_code(tokenizer, language, files, target).strip()
+        samples.append(dict(name=name, language=language, code=code))
 
     return samples
 
@@ -183,9 +187,16 @@ def build_samples(tokenizer):
 
 @torch.inference_mode()
 def score(model, encoded, device):
+    """Pooled vector and both heads, exactly as inference computes them.
+
+    `_heads` returns a dict keyed by head name and also carries the
+    training-only `projection`, which is ignored here and is absent from
+    the published checkpoint.
+    """
     encoded = encoded.to(device)
     pooled = model.encode(encoded["input_ids"], encoded["attention_mask"])
-    binary, auxiliary = model._heads(pooled)
+    heads = model._heads(pooled)
+    binary, auxiliary = heads["binary"], heads["auxiliary"]
 
     return {
         "pooled": pooled.float().cpu(),
@@ -234,6 +245,22 @@ def dump_layers(model, encoded, device, out):
 
     captured["pooled"] = pooled[0].float().cpu().contiguous()
     captured["input_ids"] = encoded["input_ids"][0].cpu().to(torch.int64).contiguous()
+
+    # Pooling is learned, so `mean(norm)` no longer reproduces `pooled` and
+    # a reimplementation cannot be checked against it. The per-token
+    # attention weights are the intermediate that makes the pooling step
+    # verifiable on its own: a port that gets these right and does the
+    # weighted sum correctly will land on `pooled`.
+    with torch.inference_mode():
+        weights = model.pool.token_weights(
+            model.backbone(
+                input_ids=encoded["input_ids"],
+                attention_mask=encoded["attention_mask"],
+            ).last_hidden_state,
+            encoded["attention_mask"],
+        )
+
+    captured["pool_weights"] = weights[0].float().cpu().contiguous()
     save_file(captured, str(out), metadata={"sample": LAYER_SAMPLE})
 
     return captured
@@ -372,6 +399,7 @@ def main():
     parser.add_argument("--skip-long", action="store_true", help="omit the three long samples")
     args = parser.parse_args()
 
+    from experiment import publish
     from experiment.encoding import PROMPT, encode, load_tokenizer
     from experiment.labels import CWE_FAMILY_NAMES
 
@@ -381,11 +409,31 @@ def main():
     model, config, _ = build_classifier()
     state = load_file(str(args.checkpoint))
     dtypes = sorted({str(t.dtype).removeprefix("torch.") for t in state.values()})
-    model.load_state_dict({k: v.float() for k, v in state.items()}, strict=True)
+
+    # The checkpoint carries the published tensor set, which omits the
+    # training-only contrastive projection, so the load is not strict in
+    # that direction. Everything the checkpoint *does* carry must match,
+    # and nothing outside the projection may be missing.
+    incompatible = model.load_state_dict(
+        {k: v.float() for k, v in state.items()}, strict=False
+    )
+    unexpected = list(incompatible.unexpected_keys)
+    missing = [
+        k for k in incompatible.missing_keys
+        if not k.startswith(publish.TRAINING_ONLY_PREFIXES)
+    ]
+    assert not unexpected, f"checkpoint has tensors the model does not: {unexpected}"
+    assert not missing, f"checkpoint is missing inference tensors: {missing}"
+
     del state
     model.float().eval().to(device)
     tokenizer = load_tokenizer(config)
-    assert len(CWE_FAMILY_NAMES) == model.auxiliary_head.out_features
+
+    # The final Linear of the auxiliary MLP head decides the family count.
+    family_outputs = [
+        m for m in model.auxiliary_head.net if isinstance(m, torch.nn.Linear)
+    ][-1].out_features
+    assert len(CWE_FAMILY_NAMES) == family_outputs
 
     samples = build_samples(tokenizer)
 
@@ -481,10 +529,11 @@ def main():
     layer_prompt = by_name[LAYER_SAMPLE]["prompt"]
     captured = dump_layers(model, encode([layer_prompt], tokenizer, config), device, args.out_dir / "layers.safetensors")
     pooled_diff = float((captured["pooled"] - torch.tensor(by_name[LAYER_SAMPLE]["pooled"])).abs().max())
-    norm_mean_diff = float((captured["norm"].mean(0) - captured["pooled"]).abs().max())
+    weights = captured["pool_weights"]
     print(
         f"wrote {args.out_dir / 'layers.safetensors'} ({len(captured)} tensors, T={captured['norm'].shape[0]}); "
-        f"pooled vs fixture diff={pooled_diff:.3g}, mean(norm) vs pooled diff={norm_mean_diff:.3g}"
+        f"pooled vs fixture diff={pooled_diff:.3g}, "
+        f"pool weights sum={float(weights.sum()):.6f} max={float(weights.max()):.4f}"
     )
 
     # Pure tokenizer cases.

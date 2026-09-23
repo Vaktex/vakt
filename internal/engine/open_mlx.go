@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"runtime"
 	"strings"
@@ -228,21 +229,13 @@ func (e *mlxEngine) Score(ctx context.Context, batch [][]int32) ([]core.Scores, 
 		return nil, err
 	}
 
-	// Masked mean pool in float32; where() so padded NaN/Inf can't leak.
-	hf := x.AsType(hidden, mlx.Float32)
-	sum := x.Sum(x.Where(mask3, hf, x.Scalar(0)), false, 1) // [B, H]
-	cnt := make([]float32, B)
-	for i, n := range lengths {
-		cnt[i] = float32(n)
-	}
-	pooled := x.Divide(sum, x.FromFloat32(cnt, B, 1))
-
 	w := e.m.w
-	if w.binW == nil {
+	if !w.heads {
 		return nil, errors.New("engine: checkpoint has no classification heads (base model)")
 	}
-	sev := x.Sigmoid(x.Add(x.Matmul(pooled, w.binW), w.binB)) // [B, 1]
-	fam := x.Sigmoid(x.Add(x.Matmul(pooled, w.auxW), w.auxB)) // [B, 18]
+	pooled, _ := attentionPool(x, w.pool, hidden, mask3, B, T) // [B, H] f32
+	sev := x.Sigmoid(mlpHead(x, w.bin, pooled))                // [B, 1]
+	fam := x.Sigmoid(mlpHead(x, w.aux, pooled))                // [B, 18]
 	if err := x.Eval(sev, fam); err != nil {
 		return nil, err
 	}
@@ -262,8 +255,54 @@ func (e *mlxEngine) Score(ctx context.Context, batch [][]int32) ([]core.Scores, 
 	return out, nil
 }
 
-// pooledForTest returns the masked mean pool for one sequence (parity tests).
+// Attention-pool constants (experiment/pooling.py).
+const (
+	poolHeads   = 4
+	poolHeadDim = hidden / poolHeads // 256
+	poolMask    = -1e4               // masked logit: zero weight, finite in fp16
+	layerNormEp = 1e-5               // PyTorch LayerNorm default (pool.norm, net.0)
+)
+
+// attentionPool is AttentionPool.forward in float32: per-head scores
+// K·q/sqrt(256), masked to -1e4 BEFORE the softmax, then the weighted sum of
+// V, concatenated, projected and LayerNormed. It also returns the per-token
+// weights averaged over heads ([B, T]) for parity tests.
+func attentionPool(x *mlx.Ctx, p poolW, hidden, mask3 *mlx.Array, B, T int) (*mlx.Array, *mlx.Array) {
+	h := x.AsType(hidden, mlx.Float32)                                  // [B, T, H]
+	k := x.Reshape(x.Matmul(h, p.keyT), B, T, poolHeads, poolHeadDim)   // [B, T, 4, 256]
+	v := x.Reshape(x.Matmul(h, p.valueT), B, T, poolHeads, poolHeadDim) // [B, T, 4, 256]
+	// scores[b,h,t] = sum_d k[b,t,h,d] * q[h,d]
+	q := x.Reshape(p.query, 1, 1, poolHeads, poolHeadDim)
+	scores := x.Sum(x.Multiply(k, q), false, -1) // [B, T, 4]
+	scores = x.Multiply(scores, x.Scalar(float32(1/math.Sqrt(poolHeadDim))))
+	// Mask before the softmax (padded positions get -1e4, as in training).
+	scores = x.Where(mask3, scores, x.Scalar(poolMask))
+	wts := x.Softmax(scores, 1) // over T: [B, T, 4]
+	// pooled[b,h,d] = sum_t w[b,t,h] * v[b,t,h,d]
+	pooled := x.Sum(x.Multiply(x.ExpandDims(wts, 3), v), false, 1) // [B, 4, 256]
+	pooled = x.Reshape(pooled, B, poolHeads*poolHeadDim)
+	pooled = x.Add(x.Matmul(pooled, p.projT), p.projB)
+	pooled = x.LayerNorm(pooled, p.normW, p.normB, layerNormEp)
+	meanW := x.Mean(wts, false, 2) // [B, T], averaged over heads
+	return pooled, meanW
+}
+
+// mlpHead is MLPHead: LayerNorm -> Linear -> exact GELU -> Linear (dropout
+// is the identity at inference). Returns logits.
+func mlpHead(x *mlx.Ctx, p headW, in *mlx.Array) *mlx.Array {
+	z := x.LayerNorm(in, p.lnW, p.lnB, layerNormEp)
+	z = x.Gelu(x.Add(x.Matmul(z, p.w1T), p.b1))
+	return x.Add(x.Matmul(z, p.w2T), p.b2)
+}
+
+// pooledForTest returns, for one sequence, the attention-pooled vector, the
+// final-norm hidden states and the per-token pool weights (parity tests).
 func (e *mlxEngine) pooledForTest(ids []int32) ([]float32, []float32, error) {
+	pooled, norm, _, err := e.poolForTest(ids)
+	return pooled, norm, err
+}
+
+func (e *mlxEngine) poolForTest(ids []int32) (pooled, norm, weights []float32, err error) {
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
 	x := mlx.NewCtx(e.s)
@@ -276,12 +315,19 @@ func (e *mlxEngine) pooledForTest(ids []int32) ([]float32, []float32, error) {
 	}
 	mask3 := x.FromBool(mv, 1, T, 1)
 	h := e.m.forward(x, a, mask3, []int{T}, 1, T)
-	norm, err := x.Float32s(h)
-	if err != nil {
-		return nil, nil, err
+	if norm, err = x.Float32s(h); err != nil {
+		return nil, nil, nil, err
 	}
-	pooled, err := x.Float32s(x.Mean(x.AsType(h, mlx.Float32), false, 1))
-	return pooled, norm, err
+	if !e.m.w.heads {
+		pooled, err = x.Float32s(x.Mean(x.AsType(h, mlx.Float32), false, 1))
+		return pooled, norm, nil, err
+	}
+	p, wts := attentionPool(x, e.m.w.pool, h, mask3, 1, T)
+	if pooled, err = x.Float32s(p); err != nil {
+		return nil, nil, nil, err
+	}
+	weights, err = x.Float32s(wts)
+	return pooled, norm, weights, err
 }
 
 // maxBatchTokens sizes the padded-token budget of one Score call to the

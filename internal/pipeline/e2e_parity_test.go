@@ -105,16 +105,17 @@ func TestEndToEndParity(t *testing.T) {
 		}
 		d := math.Abs(us[0].Severity - ref)
 		worst = max(worst, d)
-		if d > 1e-3 {
+		// The report rounds scores to 4 decimals; the engine itself is
+		// exact to ~1e-7 on these inputs (engine parity tests).
+		if d > 5e-5+1e-6 {
 			t.Errorf("%s: CLI severity %.5f, reference %.5f (|d| %.5f)", name, us[0].Severity, ref, d)
 		}
 		compared++
 	}
 	t.Logf("compared %d whole-fixture units end to end; max |d severity| %.2e", compared, worst)
-	// Few current fixtures are already in training form (most carry a
-	// trailing newline the reference scored); at least one must match.
-	// Regenerating fixtures with trimmed code widens this (tools/parity_fixtures.py).
-	if compared < 1 {
+	// Fixtures are in training form (tools/parity_fixtures.py strips them);
+	// most are single definitions or whole files that extract to one unit.
+	if compared < 20 {
 		t.Fatalf("only %d fixtures compared end to end", compared)
 	}
 }

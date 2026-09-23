@@ -16,7 +16,8 @@ go build -tags mlx ./cmd/vakt
 | `Qwen3_5DecoderLayer`: pre-norm residual | `forward` |
 | `Qwen3_5Attention`: q_proj holds query and gate per head; q/k RMSNorm; partial RoPE (64 of 256, θ = 1e7, rotate_half); GQA 8/2; output × sigmoid(gate) | `attention` (fused q\|k\|v projection, MLX `fast.rope`, `fast.scaled_dot_product_attention` in causal mode) |
 | `Qwen3_5GatedDeltaNet`: mask padding; in_proj_qkv; causal depthwise conv (k=4) + SiLU; l2norm q/k; q × 1/√128; β = σ(b); g = −exp(A_log) · softplus(a + dt_bias); gated delta rule; RMSNormGated (plain w) · SiLU(z); out_proj | `linearAttention` (fused qkv\|z\|b\|a projection, `convSilu` Metal kernel, `deltaKernel` Metal kernel) |
-| `QwenClassifier`: masked mean pool (f32), then binary_head and auxiliary_head, then sigmoid | `mlxEngine.Score` |
+| `AttentionPool` (f32): 4 queries × 256, keys/values without bias, scores × 1/16 masked to −1e4 before the softmax, weighted sum of values, project + LayerNorm (eps 1e-5) | `attentionPool` |
+| `MLPHead` (f32) for binary_head and auxiliary_head: LayerNorm → Linear 1024→2048 → exact (erf) GELU → Linear, then sigmoid | `mlpHead`, `mlxEngine.Score` |
 
 The mRoPE sections reduce to 1D RoPE for text-only input: all three position rows are equal.
 

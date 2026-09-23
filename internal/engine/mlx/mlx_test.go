@@ -246,7 +246,7 @@ func TestLoadSafetensors(t *testing.T) {
 			a.Free()
 		}
 	}()
-	for _, k := range []string{"input_ids", "embeddings", "layers.00", "layers.23", "norm", "pooled"} {
+	for _, k := range []string{"input_ids", "embeddings", "layers.00", "layers.23", "norm", "pooled", "pool_weights"} {
 		if m[k] == nil {
 			t.Fatalf("missing %s", k)
 		}
@@ -254,8 +254,16 @@ func TestLoadSafetensors(t *testing.T) {
 	if s := m["norm"].Shape(); len(s) != 2 || s[1] != 1024 {
 		t.Fatalf("norm shape %v", s)
 	}
-	// mean(norm) == pooled (the fixture's own invariant).
-	near(t, "pooled", vals(t, x, x.Mean(m["norm"], false, 0)), vals(t, x, m["pooled"]), 1e-5)
+	// Pooling is learned attention now: pool_weights are a distribution
+	// over the tokens (the fixture's own invariant).
+	w := vals(t, x, m["pool_weights"])
+	var sum float64
+	for _, v := range w {
+		sum += float64(v)
+	}
+	if len(w) != m["norm"].Shape()[0] || math.Abs(sum-1) > 1e-5 {
+		t.Fatalf("pool_weights: %d weights summing to %v", len(w), sum)
+	}
 }
 
 // Float32s must return logical order for views (transpose/strided slice).
@@ -265,4 +273,46 @@ func TestFloat32sOfViews(t *testing.T) {
 	near(t, "transpose", vals(t, x, x.Transpose(a, 1, 0)), []float32{0, 3, 1, 4, 2, 5}, 0)
 	near(t, "strided", vals(t, x, x.Slice(a, []int{0, 0}, []int{2, 3}, []int{1, 2})), []float32{0, 2, 3, 5}, 0)
 	near(t, "column", vals(t, x, x.Slice(a, []int{0, 1}, []int{2, 2}, nil)), []float32{1, 4}, 0)
+}
+
+// GELU must be the exact erf form (PyTorch nn.GELU default), not the tanh
+// approximation: the two differ by up to ~5e-4, past the 1e-4 parity bound.
+func TestGeluExact(t *testing.T) {
+	x := newCtx(t)
+	in := []float32{-3, -1, -0.5, 0, 0.5, 1, 2, 3}
+	want := make([]float32, len(in))
+	for i, v := range in {
+		want[i] = float32(0.5 * float64(v) * (1 + math.Erf(float64(v)/math.Sqrt2)))
+	}
+	near(t, "gelu", vals(t, x, x.Gelu(x.FromFloat32(in, len(in)))), want, 1e-6)
+}
+
+func TestSoftmaxAndLayerNorm(t *testing.T) {
+	x := newCtx(t)
+	in := []float32{1, 2, 3, -1e4}
+	var z float64
+	for _, v := range in {
+		z += math.Exp(float64(v))
+	}
+	want := make([]float32, 4)
+	for i, v := range in {
+		want[i] = float32(math.Exp(float64(v)) / z)
+	}
+	near(t, "softmax", vals(t, x, x.Softmax(x.FromFloat32(in, 1, 4), -1)), want, 1e-6)
+
+	a := []float32{1, 2, 3, 6}
+	w := []float32{1, 0.5, 2, 1}
+	b := []float32{0, 1, 0, -1}
+	var mean, v float64
+	for _, e := range a {
+		mean += float64(e) / 4
+	}
+	for _, e := range a {
+		v += (float64(e) - mean) * (float64(e) - mean) / 4
+	}
+	ln := make([]float32, 4)
+	for i, e := range a {
+		ln[i] = float32((float64(e)-mean)/math.Sqrt(v+1e-5)*float64(w[i]) + float64(b[i]))
+	}
+	near(t, "layer_norm", vals(t, x, x.LayerNorm(x.FromFloat32(a, 1, 4), x.FromFloat32(w, 4), x.FromFloat32(b, 4), 1e-5)), ln, 1e-5)
 }
