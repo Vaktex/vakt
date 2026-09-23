@@ -370,9 +370,15 @@ func TestParityBF16Compute(t *testing.T) {
 	for i, ids := range batch {
 		alone, _ := e.Score(context.Background(), [][]int32{ids})
 		maxB = math.Max(maxB, math.Abs(float64(alone[0].Severity-together[i].Severity)))
+		for j := range core.NumFamilies {
+			maxB = math.Max(maxB, math.Abs(float64(alone[0].Families[j]-together[i].Families[j])))
+		}
 	}
 	t.Logf("bf16 compute: max|Δs| = %.3g, max|Δp| = %.3g, batch invariance %.3g", maxS, maxP, maxB)
 	if maxB > 1e-2 {
 		t.Errorf("bf16 batch invariance %.3g > 1e-2", maxB)
+	}
+	if maxS > 2e-2 || maxP > 2e-2 {
+		t.Errorf("bf16 drift vs fp32 reference: |Δs| %.3g |Δp| %.3g > 2e-2", maxS, maxP)
 	}
 }

@@ -273,11 +273,23 @@ func (e *mlxEngine) pooledForTest(ids []int32) ([]float32, []float32, error) {
 	return pooled, norm, err
 }
 
+// maxBatchTokens sizes the padded-token budget of one Score call to the
+// device's memory. Measured on the fp32 mock: weights ~3 GB, and a full
+// 32k-token batch peaks near 15 GB (~0.37 MB per padded token), so the
+// budget is (limit - weights - headroom) / 0.4 MB, clamped to
+// [MaxTokens, 32768]. A single MaxTokens sequence is always allowed.
 func maxBatchTokens(backend string) int {
 	if backend == "cpu" {
 		return 8192
 	}
-	return 32768
+	const perToken = 400 << 10
+	const reserve = 4 << 30 // weights + headroom
+	limit := mlx.MemoryLimit()
+	if limit <= reserve {
+		return core.MaxTokens
+	}
+	n := int((limit - reserve) / perToken)
+	return min(max(n, core.MaxTokens), 32768)
 }
 
 func configureMemory(backend string) {

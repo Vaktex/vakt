@@ -541,6 +541,15 @@ func SetWiredLimit(n uint64) uint64 {
 	return uint64(old)
 }
 
+// MemoryLimit returns MLX's memory limit for the default device (bytes); on
+// Metal this defaults to the GPU's recommended working set.
+func MemoryLimit() uint64 {
+	Init()
+	var n C.size_t
+	C.mlx_get_memory_limit(&n)
+	return uint64(n)
+}
+
 // ActiveMemory returns bytes currently held by live arrays.
 func ActiveMemory() uint64 {
 	var n C.size_t
