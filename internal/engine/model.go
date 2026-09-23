@@ -73,15 +73,36 @@ type layerW struct {
 // "backbone." (published model) or "model.language_model." (base model; no
 // heads). Raw arrays are released as they are consumed.
 func loadWeights(x *mlx.Ctx, raw map[string]*mlx.Array, prefix string, compute mlx.DType, heads bool) (*weights, error) {
+	var used []string // raw tensors consumed since the last materialise
 	get := func(name string) *mlx.Array {
 		a := raw[name]
 		if a == nil {
 			x.Fail(fmt.Errorf("missing tensor %s", name))
 			return x.Zeros(mlx.Float32, 1)
 		}
+		used = append(used, name)
 		return a
 	}
 	w := &weights{compute: compute}
+	// materialise evaluates the weights built so far and releases the raw
+	// tensors they came from, so peak memory is the laid-out model plus one
+	// layer's raw tensors rather than twice the model (a 3 GB fp32
+	// checkpoint otherwise peaked at 6.6 GB and was OOM-killed on 7 GB
+	// hosts).
+	materialise := func() error {
+		if err := x.Eval(w.all...); err != nil {
+			return err
+		}
+		for _, n := range used {
+			if a := raw[n]; a != nil {
+				a.Free()
+				delete(raw, n)
+			}
+		}
+		used = used[:0]
+		x.Free() // intermediates (casts, concatenations)
+		return nil
+	}
 	keep := func(a *mlx.Array) *mlx.Array {
 		x.Keep(a)
 		w.all = append(w.all, a)
@@ -135,6 +156,9 @@ func loadWeights(x *mlx.Ctx, raw map[string]*mlx.Array, prefix string, compute m
 			L.outProj = keep(lin(a + "out_proj.weight"))
 		}
 		w.layers = append(w.layers, L)
+		if err := materialise(); err != nil {
+			return nil, err
+		}
 	}
 	if heads {
 		w.binW = keep(x.Contiguous(x.Transpose(f32(get("binary_head.weight")), 1, 0)))
