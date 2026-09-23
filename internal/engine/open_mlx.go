@@ -71,6 +71,12 @@ func open(opts Options) (core.Engine, error) {
 	}
 
 	// 2. Device.
+	// MLX's CUDA build allocates every array (CPU stream included) with
+	// cudaMallocManaged, so without a working NVIDIA driver it cannot run
+	// at all: say so instead of failing on the first array.
+	if gpuBackend == "cuda" && !gpuOK() {
+		return nil, fmt.Errorf("%w: this is the CUDA build of %s and no usable NVIDIA GPU/driver was found; install the CPU build (install.sh picks it automatically)", ErrUnavailable, brand.Binary)
+	}
 	var s *mlx.Stream
 	backend, device := "cpu", cpuName()
 	switch opts.Device {

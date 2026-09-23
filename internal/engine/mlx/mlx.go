@@ -463,14 +463,28 @@ func (x *Ctx) fromData(op string, p unsafe.Pointer, n int, shape []int, dt DType
 	defer freeInts(sp)
 	// mlx_array_new_data copies the buffer, so the Go memory need only live
 	// for the duration of the call (cgo pins it).
-	return x.track(C.mlx_array_new_data(p, sp, C.int(sn), cdtype(dt))) // #nosec G115 -- sn = len(shape) <= 8
+	return x.made("array", C.mlx_array_new_data(p, sp, C.int(sn), cdtype(dt))) // #nosec G115 -- sn = len(shape) <= 8
 }
 
 // Scalar returns a 0-d float32 array.
-func (x *Ctx) Scalar(v float32) *Array { return x.track(C.mlx_array_new_float32(C.float(v))) }
+func (x *Ctx) Scalar(v float32) *Array { return x.made("scalar", C.mlx_array_new_float32(C.float(v))) }
+
+// made tracks a freshly constructed array. Constructors report failure
+// (e.g. an allocation error) only by returning an empty handle; record
+// MLX's message so the error names the real cause, not a later "nil input".
+func (x *Ctx) made(op string, c C.mlx_array) *Array {
+	if c.ctx == nil && x.err == nil {
+		msg := takeLastErr()
+		if msg == "" {
+			msg = "allocation failed"
+		}
+		x.Fail(&Error{Op: op, Msg: msg})
+	}
+	return x.track(c)
+}
 
 // ScalarInt returns a 0-d int32 array.
-func (x *Ctx) ScalarInt(v int) *Array { return x.track(C.mlx_array_new_int(cint(v))) }
+func (x *Ctx) ScalarInt(v int) *Array { return x.made("scalar", C.mlx_array_new_int(cint(v))) }
 
 // ---------------------------------------------------------------- evaluation
 
