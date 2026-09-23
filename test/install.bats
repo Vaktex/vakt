@@ -291,3 +291,25 @@ setup() {
 	[ "$status" -eq 0 ]
 	[[ "$output" == *"is not on your PATH"* ]]
 }
+
+@test "missing OpenBLAS on Ubuntu offers apt install with --yes" {
+	export STUB_NO_BLAS=1
+	setup_stubs
+	os_release ubuntu 22.04
+	publish vakt-linux-amd64-cpu
+	run_installer --version v1.0.0 --yes
+	[ "$status" -eq 0 ]
+	[[ "$output" == *"missing runtime libraries"* ]]
+	grep -q '^sudo apt-get install -y libopenblas0 liblapack3' "$CALLS"
+}
+
+@test "missing OpenBLAS with --no-deps only prints the command" {
+	export STUB_NO_BLAS=1
+	setup_stubs
+	os_release fedora 42
+	publish vakt-linux-amd64-cpu
+	run_installer --version v1.0.0 --no-deps
+	[ "$status" -eq 0 ]
+	[[ "$output" == *"sudo dnf install -y openblas lapack"* ]]
+	! grep -q '^sudo' "$CALLS"
+}

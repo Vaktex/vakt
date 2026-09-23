@@ -5,8 +5,11 @@ go 1.27.1
 require (
 	github.com/charmbracelet/lipgloss v1.1.0
 	github.com/charmbracelet/x/ansi v0.8.0
+	github.com/daulet/tokenizers v1.27.0
+	github.com/klauspost/compress v1.20.0
 	github.com/muesli/termenv v0.16.0
 	github.com/spf13/cobra v1.10.2
+	golang.org/x/sync v0.23.0
 	golang.org/x/term v0.46.0
 )
 

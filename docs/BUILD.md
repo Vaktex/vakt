@@ -64,7 +64,7 @@ The build uses `nvidia/cuda:13.0.3-cudnn-devel-ubuntu22.04` (CUDA, pinned by dig
 
 ## Reproducibility
 
-The toolchains are pinned and checksum-verified: Go 1.27.1, rustup 1.29.1 with Rust 1.98.1, and the CUDA 13.0.3 image. Release binaries are still deliberately **not** bit-reproducible. `garble -seed=random` picks new name hashes on every build, so symbols can't be diffed across releases. The chosen seed is printed in the build log, so keep CI logs private. Check releases through `SHA256SUMS` and the GitHub build provenance attestations, not by rebuilding.
+The toolchains are pinned and checksum-verified: Go 1.27.1, rustup 1.29.1 with Rust 1.98.1, cmake 3.31.8 from Kitware (Ubuntu 22.04's 3.22 is too old for MLX) and the CUDA 13.0.3 image. Release binaries are still deliberately **not** bit-reproducible. `garble -seed=random` picks new name hashes on every build, so symbols can't be diffed across releases. The chosen seed is printed in the build log, so keep CI logs private. Check releases through `SHA256SUMS` and the GitHub build provenance attestations, not by rebuilding.
 
 ## Signing (macOS)
 

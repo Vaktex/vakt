@@ -90,10 +90,11 @@ export CGO_CFLAGS   := $(CGO_CFLAGS) $(PREFIX_MAP)
 export CGO_CXXFLAGS := $(CGO_CXXFLAGS) $(PREFIX_MAP)
 export CFLAGS       := $(CFLAGS) $(PREFIX_MAP)
 export CXXFLAGS     := $(CXXFLAGS) $(PREFIX_MAP)
+export CUDAFLAGS    := $(CUDAFLAGS) -Xcompiler=$(PREFIX_MAP)
 CARGO_HOME ?= $(HOME)/.cargo
-export RUSTFLAGS    := $(RUSTFLAGS) --remap-path-prefix=$(CURDIR)=. \
-	--remap-path-prefix=$(CARGO_HOME)/registry/src=crates --remap-path-prefix=$(CARGO_HOME)/git/checkouts=crates-git \
-	--remap-path-prefix=$(HOME)=~
+# rustc applies the LAST matching remap: broadest first, most specific last.
+export RUSTFLAGS    := $(RUSTFLAGS) --remap-path-prefix=$(HOME)=~ --remap-path-prefix=$(CURDIR)=. \
+	--remap-path-prefix=$(CARGO_HOME)/registry/src=crates --remap-path-prefix=$(CARGO_HOME)/git/checkouts=crates-git
 
 .PHONY: help deps deps-mlx deps-tokenizers dev prod sign test parity bench lint audit checksums clean print-%
 

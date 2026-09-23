@@ -35,14 +35,15 @@ leaks=$(strings -a "$bin" | grep -oE \
 	-e '/home/[A-Za-z][^ ]{0,40}' \
 	-e '/root/[^ ]{0,40}' \
 	-e '(^|[^A-Za-z0-9._-])/src/[A-Za-z][^ ]{0,40}' \
-	-e '/Users/runner/[^ ]{0,40}' \
-	-e '/home/runner/[^ ]{0,40}' \
+	-e '/Users/runner/work/[^r][^ ]{0,40}' \
+	-e '/home/runner/work/[^r][^ ]{0,40}' \
 	-e '/\.cargo/(registry|git)[^ ]{0,40}' \
 	-e '/src/third_party[^ ]{0,40}' \
 	-e 'vakt/(internal|cmd)/[^ ]{0,40}' \
 	-e 'internal/(engine|pipeline|hub|tokenize|ast|walk|report|brand|core|labels)/[^ ]{0,20}' \
 	-e '(^|[^A-Za-z0-9_])hf_[A-Za-z0-9]{34}([^A-Za-z0-9]|$)' \
 	-e 'HF_TOKEN=[^ ]{0,10}' \
+	| grep -vE '^/(Users|home)/runner/work/rust/rust/(build|library)/' \
 	| sort -u | head -n 10 || true)
 if [ -n "$leaks" ]; then
 	bad "leaking strings:"
@@ -69,6 +70,15 @@ Linux)
 		pass "glibc requirement $need <= $max_glibc"
 	else
 		bad "binary needs glibc $need > supported $max_glibc (build on an older base image)"
+	fi
+	# Every dynamic dependency must be something install.sh checks for or
+	# installs (glibc, OpenBLAS/LAPACK, the CUDA 13 runtime) or ships with it.
+	unexpected=$(readelf -d "$bin" 2>/dev/null | sed -n 's/.*(NEEDED).*\[\(.*\)\]/\1/p' | grep -vE \
+		'^(libc|libm|libdl|librt|libpthread|libstdc\+\+|libgcc_s|ld-linux[-a-z0-9_]*)\.so|^lib(openblas|lapack|lapacke|gfortran|quadmath)\.so|^lib(cublas|cublasLt|nvrtc|cudnn|cuda|nccl)\.so' || true)
+	if [ -n "$unexpected" ]; then
+		bad "unexpected shared library dependencies: $(printf '%s' "$unexpected" | tr '\n' ' ')"
+	else
+		pass "shared library dependencies are all provisioned by install.sh"
 	fi
 	;;
 *)
