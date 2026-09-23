@@ -100,8 +100,13 @@ if command -v ccache >/dev/null 2>&1; then
 	launcher=(-DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache -DCMAKE_CUDA_COMPILER_LAUNCHER=ccache)
 fi
 
+# Strip absolute source paths from debug info, __FILE__ and error strings so the
+# release binary contains no /Users/... or /home/... paths.
+pfx="-ffile-prefix-map=$root=. -ffile-prefix-map=$src=third_party/src"
 opts=(
 	-DCMAKE_BUILD_TYPE="$build_type"
+	-DCMAKE_C_FLAGS="${CFLAGS:-} $pfx"
+	-DCMAKE_CXX_FLAGS="${CXXFLAGS:-} $pfx"
 	-DCMAKE_INSTALL_PREFIX="$prefix"
 	-DCMAKE_POSITION_INDEPENDENT_CODE=ON
 	-DBUILD_SHARED_LIBS=OFF
