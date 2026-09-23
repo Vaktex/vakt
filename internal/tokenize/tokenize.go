@@ -61,6 +61,10 @@ const MaxInputBytes = 4 << 20
 // share is free. Typical units (a few KB to ~64 KB) never wait.
 const MaxInFlightBytes = 16 << 20
 
+// A single input must always fit the in-flight budget, or Acquire would
+// block forever. Fails to compile if the constants are changed badly.
+const _ = uint(MaxInFlightBytes - MaxInputBytes)
+
 // ErrTooLarge is returned by Encode for text over MaxInputBytes.
 var ErrTooLarge = errors.New("tokenize: input exceeds 4 MiB")
 
@@ -138,6 +142,11 @@ func (t *Tokenizer) Encode(text string) ([]int32, error) {
 		return nil, fmt.Errorf("%w (%d bytes)", ErrTooLarge, len(text))
 	}
 	text = Sanitize(text)
+	// Replacing invalid bytes with U+FFFD can triple the size: enforce the
+	// cap on what actually reaches the tokenizer too.
+	if len(text) > MaxInputBytes {
+		return nil, fmt.Errorf("%w (%d bytes after UTF-8 repair)", ErrTooLarge, len(text))
+	}
 	if text == "" {
 		return []int32{}, nil
 	}
@@ -219,10 +228,19 @@ func PromptKey(text string) [32]byte {
 // instead: every token covers at least one byte of the sanitized text, so its
 // byte length bounds the count. Oversize input therefore always looks too
 // long to fit, never too short.
+//
+// Errors other than ErrTooLarge (e.g. a closed tokenizer) are programming
+// errors, not size signals, so they panic rather than report a small count.
 func Count(t core.Tokenizer, s string) int {
+	if len(s) > MaxInputBytes {
+		return len(s) // cheap: never sanitize a huge input just to say "too big"
+	}
 	ids, err := t.Encode(s)
-	if err != nil {
+	if errors.Is(err, ErrTooLarge) {
 		return len(Sanitize(s))
+	}
+	if err != nil {
+		panic("tokenize: Count: " + err.Error())
 	}
 	return len(ids)
 }

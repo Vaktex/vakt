@@ -37,7 +37,8 @@ fi
 
 OUT_DIR="$HERE/lib/${GOOS}_${GOARCH}"
 STAMP="$OUT_DIR/VERSION"
-if [[ $FORCE -eq 0 && -f "$OUT_DIR/libtokenizers.a" && -f "$STAMP" && "$(cat "$STAMP")" == "$TAG $COMMIT" ]]; then
+lib_sha() { if command -v sha256sum >/dev/null; then sha256sum "$1"; else shasum -a 256 "$1"; fi | cut -d' ' -f1; }
+if [[ $FORCE -eq 0 && -f "$OUT_DIR/libtokenizers.a" && -f "$STAMP" && "$(cat "$STAMP")" == "$TAG $COMMIT $(lib_sha "$OUT_DIR/libtokenizers.a")" ]]; then
   echo "libtokenizers.a $TAG already built at $OUT_DIR"
   exit 0
 fi
@@ -52,7 +53,19 @@ fi
 if [[ -z "$CARGO" ]]; then
   if [[ "${INSTALL_RUST:-0}" == 1 ]]; then
     command -v curl >/dev/null || { echo "build.sh: curl is required to install rust" >&2; exit 1; }
-    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+    # Pinned, checksum-verified rustup-init and toolchain (never curl|sh).
+    RUSTUP_VERSION=1.29.1 RUST_TOOLCHAIN="${RUST_TOOLCHAIN:-1.98.1}"
+    case "$(uname -s)-$(uname -m)" in
+      Linux-x86_64)  triple=x86_64-unknown-linux-gnu;  rsum=dda7234360b7f578ca8b0ddcb80145646fa61a67c1720a5abc7051b35c9fcb71 ;;
+      Linux-aarch64) triple=aarch64-unknown-linux-gnu; rsum=15f6e4ce9f583b929c996c91562bad6d4454f3281de858b02cdfdef615fac433 ;;
+      *) echo "build.sh: INSTALL_RUST=1 supports linux x86_64/aarch64 only; install rust yourself" >&2; exit 1 ;;
+    esac
+    tmp_rustup="$(mktemp)"
+    curl --proto '=https' --tlsv1.2 -fsSL "https://static.rust-lang.org/rustup/archive/$RUSTUP_VERSION/$triple/rustup-init" -o "$tmp_rustup"
+    echo "$rsum  $tmp_rustup" | sha256sum -c - >/dev/null || { echo "build.sh: rustup-init checksum mismatch" >&2; rm -f "$tmp_rustup"; exit 1; }
+    chmod +x "$tmp_rustup"
+    "$tmp_rustup" -y --profile minimal --default-toolchain "$RUST_TOOLCHAIN"
+    rm -f "$tmp_rustup"
     CARGO="$HOME/.cargo/bin/cargo"
   else
     echo "build.sh: cargo not found; install rust (https://rustup.rs) or set INSTALL_RUST=1" >&2
@@ -88,17 +101,17 @@ export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$SRC_DIR/target}"
 # Keep build-machine paths (panic locations) out of the archive, even when this
 # script runs outside `make deps` (which exports its own RUSTFLAGS remaps).
 # RUSTFLAGS is part of the cargo fingerprint, so a change rebuilds.
-if [[ "${RUSTFLAGS:-}" != *remap-path-prefix* ]]; then
-  # rustc applies the LAST matching remap, so the broad $HOME one goes first.
-  CARGO_HOME_DIR="${CARGO_HOME:-$HOME/.cargo}"
-  export RUSTFLAGS="${RUSTFLAGS:-} --remap-path-prefix=$HOME=~ \
+# Always appended: rustc applies the LAST matching remap, so the broad $HOME
+# one goes first and the specific ones after it, and they win over any
+# (possibly partial) remaps the caller passed in RUSTFLAGS.
+CARGO_HOME_DIR="${CARGO_HOME:-$HOME/.cargo}"
+export RUSTFLAGS="${RUSTFLAGS:-} --remap-path-prefix=$HOME=~ \
 --remap-path-prefix=$SRC_DIR=tokenizers \
 --remap-path-prefix=$CARGO_HOME_DIR/registry/src=crates \
 --remap-path-prefix=$CARGO_HOME_DIR/git/checkouts=crates-git"
-fi
 (cd "$SRC_DIR" && "$CARGO" build --release --locked -p tokenizers-ffi)
 
 mkdir -p "$OUT_DIR"
 cp "$CARGO_TARGET_DIR/release/libtokenizers_ffi.a" "$OUT_DIR/libtokenizers.a"
-echo "$TAG $COMMIT" > "$STAMP"
+echo "$TAG $COMMIT $(lib_sha "$OUT_DIR/libtokenizers.a")" > "$STAMP"
 echo "installed $OUT_DIR/libtokenizers.a ($TAG)"
