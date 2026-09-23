@@ -258,10 +258,39 @@ func (m *model) attention(x *mlx.Ctx, h *mlx.Array, L layerW, B, T int) *mlx.Arr
 	k = x.RoPE(k, ropeDims, false, ropeTheta, 1, 0)
 
 	// Right padding + causal mask: real queries never see padded keys.
-	o := x.SDPA(q, k, v, float32(1/math.Sqrt(headDim)), "causal", nil)
+	o := blockedCausalSDPA(x, q, k, v, float32(1/math.Sqrt(headDim)), B, T)
 	o = x.Reshape(x.Transpose(o, 0, 2, 1, 3), B, T, attnHeads*headDim)
 	o = x.Multiply(o, x.Sigmoid(gate))
 	return x.Matmul(o, L.o)
+}
+
+// attnBlock bounds the query block of full attention. MLX 0.31.1 has no fused
+// Metal kernel for head_dim 256 beyond 8 queries and falls back to
+// materialising the [B, Hq, Tq, Tk] score matrix: at T=16k that is ~8.6 GB
+// per layer. Blocking queries keeps it at [B, Hq, attnBlock, <=T].
+const attnBlock = 1024
+
+// blockedCausalSDPA computes causal attention one query block at a time.
+// For queries [s, e) it attends to keys [0, e); MLX aligns the causal mask
+// bottom-right when Tq < Tk, which is exactly this.
+func blockedCausalSDPA(x *mlx.Ctx, q, k, v *mlx.Array, scale float32, B, T int) *mlx.Array {
+	if T <= attnBlock {
+		return x.SDPA(q, k, v, scale, "causal", nil)
+	}
+	var outs []*mlx.Array
+	for s := 0; s < T; s += attnBlock {
+		e := min(s+attnBlock, T)
+		qb := x.Slice(q, []int{0, 0, s, 0}, []int{B, attnHeads, e, headDim}, nil)
+		kb := x.Slice(k, []int{0, 0, 0, 0}, []int{B, kvHeads, e, headDim}, nil)
+		vb := x.Slice(v, []int{0, 0, 0, 0}, []int{B, kvHeads, e, headDim}, nil)
+		ob := x.SDPA(qb, kb, vb, scale, "causal", nil)
+		// Evaluate each block so only one score matrix is alive at a time.
+		if x.Eval(ob) != nil {
+			return ob
+		}
+		outs = append(outs, ob)
+	}
+	return x.Concatenate(2, outs...)
 }
 
 // linearAttention is Qwen3_5GatedDeltaNet.

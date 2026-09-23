@@ -26,8 +26,11 @@ var metallib []byte
 // freed: MLX may (re)create the library for each device, and the pointer
 // must stay valid and immovable for the life of the process.
 func registerMetallib() {
+	// The build must embed the library: without it MLX would fall back to
+	// loading mlx.metallib from paths relative to the binary or the working
+	// directory, which may be inside the repository being scanned.
 	if len(metallib) == 0 {
-		return
+		panic("mlx: embedded metallib is empty; run `go generate ./internal/engine/mlx` (make deps)")
 	}
 	p := C.malloc(C.size_t(len(metallib)))
 	C.memcpy(p, unsafe.Pointer(unsafe.SliceData(metallib)), C.size_t(len(metallib)))

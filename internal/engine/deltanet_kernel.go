@@ -21,6 +21,9 @@ const gatedDeltaSource = `
     const uint bh = thread_position_in_grid.z;
     const uint b = bh / H;
     const uint h = bh % H;
+    // T is read at runtime (not a template arg) so one compiled kernel
+    // serves every sequence length.
+    const int T = g_shape[1];
     constexpr int NP = Dk / 32;
     float state[NP];
     for (int i = 0; i < NP; ++i) { state[i] = 0.0f; }
@@ -56,7 +59,9 @@ const convSiluSource = `
     const uint c = thread_position_in_grid.x;
     const uint t = thread_position_in_grid.y;
     const uint b = thread_position_in_grid.z;
-    if (c >= C || t >= T) { return; }
+    const int T = x_shape[1];
+    const int C = x_shape[2];
+    if (int(c) >= C || int(t) >= T) { return; }
     float acc = 0.0f;
     for (int k = 0; k < K; ++k) {
         const int src = int(t) - (K - 1) + k;
@@ -77,7 +82,7 @@ func (m *model) convSilu(x *mlx.Ctx, in *mlx.Array, taps *mlx.Array, B, T, C int
 		Grid:           [3]int{C, T, B},
 		ThreadGroup:    [3]int{256, 1, 1},
 		Outputs:        []mlx.KernelOutput{{Shape: []int{B, T, C}, Dtype: in.Dtype()}},
-		TemplateInts:   map[string]int{"T": T, "C": C, "K": convKernel},
+		TemplateInts:   map[string]int{"K": convKernel},
 		TemplateDtypes: map[string]mlx.DType{"OutT": in.Dtype()},
 	})
 	return out[0]
@@ -90,12 +95,10 @@ func newDeltaKernel() *mlx.Kernel {
 func (m *model) deltaKernel(x *mlx.Ctx, q, k, v, g, beta *mlx.Array, B, T int) *mlx.Array {
 	c := x.Contiguous
 	out := x.Apply(m.kern, []*mlx.Array{c(q), c(k), c(v), c(g), c(beta)}, mlx.KernelLaunch{
-		Grid:        [3]int{32, linValDim, B * linHeads},
-		ThreadGroup: [3]int{32, 4, 1},
-		Outputs:     []mlx.KernelOutput{{Shape: []int{B, T, linHeads, linValDim}, Dtype: mlx.Float32}},
-		TemplateInts: map[string]int{
-			"T": T, "H": linHeads, "Dk": linKeyDim, "Dv": linValDim,
-		},
+		Grid:         [3]int{32, linValDim, B * linHeads},
+		ThreadGroup:  [3]int{32, 4, 1},
+		Outputs:      []mlx.KernelOutput{{Shape: []int{B, T, linHeads, linValDim}, Dtype: mlx.Float32}},
+		TemplateInts: map[string]int{"H": linHeads, "Dk": linKeyDim, "Dv": linValDim},
 	})
 	return out[0]
 }

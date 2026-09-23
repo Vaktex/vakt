@@ -97,6 +97,16 @@ func open(opts Options) (core.Engine, error) {
 		s.Free()
 		return nil, err
 	}
+	// Re-check what MLX actually loaded: the file is opened twice (header
+	// validation, then MLX), so a same-user swap in between must not be
+	// able to shrink a tensor below the shape the forward pass indexes.
+	if err := checkLoaded(raw, safetensors.DOMExpectations(prefix)); err != nil {
+		for _, a := range raw {
+			a.Free()
+		}
+		s.Free()
+		return nil, err
+	}
 	compute := mlx.Float32
 	if prec == "bf16" {
 		compute = mlx.BFloat16
@@ -154,6 +164,11 @@ func (e *mlxEngine) Score(ctx context.Context, batch [][]int32) ([]core.Scores, 
 		}
 		lengths[i] = len(ids)
 		T = max(T, len(ids))
+	}
+	// Bound the padded batch: the pipeline sizes batches with
+	// MaxBatchTokens, but Score must be safe on its own.
+	if B > maxBatchSeqs || B*T > max(e.maxBT, core.MaxTokens) {
+		return nil, fmt.Errorf("engine: batch of %d x %d padded tokens exceeds the limit (%d tokens, %d sequences)", B, T, max(e.maxBT, core.MaxTokens), maxBatchSeqs)
 	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -261,4 +276,32 @@ func evalEveryFromEnv(def int) int {
 		}
 	}
 	return def
+}
+
+// maxBatchSeqs caps the number of sequences in one Score call.
+const maxBatchSeqs = 256
+
+// checkLoaded verifies every expected tensor's loaded shape and dtype.
+func checkLoaded(raw map[string]*mlx.Array, want []safetensors.Expect) error {
+	for _, e := range want {
+		a := raw[e.Name]
+		if a == nil {
+			return fmt.Errorf("engine: model changed while loading: %s missing", e.Name)
+		}
+		got := a.Shape()
+		if len(got) != len(e.Shape) {
+			return fmt.Errorf("engine: model changed while loading: %s has shape %v", e.Name, got)
+		}
+		for i := range got {
+			if int64(got[i]) != e.Shape[i] {
+				return fmt.Errorf("engine: model changed while loading: %s has shape %v", e.Name, got)
+			}
+		}
+		switch a.Dtype() {
+		case mlx.Float32, mlx.BFloat16, mlx.Float16:
+		default:
+			return fmt.Errorf("engine: model changed while loading: %s has dtype %s", e.Name, a.Dtype())
+		}
+	}
+	return nil
 }

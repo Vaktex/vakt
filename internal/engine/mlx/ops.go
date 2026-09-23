@@ -70,7 +70,7 @@ func (x *Ctx) AsType(a *Array, dt DType) *Array {
 	// Always return a new handle (MLX makes same-dtype astype a no-op view),
 	// so the result's lifetime is independent of a's.
 	res := C.mlx_array_new()
-	if !x.check("astype", C.mlx_astype(&res, a.c, C.mlx_dtype(dt), x.S.c)) {
+	if !x.check("astype", C.mlx_astype(&res, a.c, cdtype(dt), x.S.c)) {
 		C.mlx_array_free(res)
 		return x.empty()
 	}
@@ -147,7 +147,7 @@ func (x *Ctx) SwapAxes(a *Array, i, j int) *Array {
 		return x.empty()
 	}
 	res := C.mlx_array_new()
-	if !x.check("swapaxes", C.mlx_swapaxes(&res, a.c, C.int(i), C.int(j), x.S.c)) {
+	if !x.check("swapaxes", C.mlx_swapaxes(&res, a.c, cint(i), cint(j), x.S.c)) {
 		C.mlx_array_free(res)
 		return x.empty()
 	}
@@ -160,7 +160,7 @@ func (x *Ctx) ExpandDims(a *Array, axis int) *Array {
 		return x.empty()
 	}
 	res := C.mlx_array_new()
-	if !x.check("expand_dims", C.mlx_expand_dims(&res, a.c, C.int(axis), x.S.c)) {
+	if !x.check("expand_dims", C.mlx_expand_dims(&res, a.c, cint(axis), x.S.c)) {
 		C.mlx_array_free(res)
 		return x.empty()
 	}
@@ -208,7 +208,7 @@ func (x *Ctx) Concatenate(axis int, arrays ...*Array) *Array {
 		C.mlx_vector_array_append_value(vec, a.c)
 	}
 	res := C.mlx_array_new()
-	if !x.check("concatenate", C.mlx_concatenate_axis(&res, vec, C.int(axis), x.S.c)) {
+	if !x.check("concatenate", C.mlx_concatenate_axis(&res, vec, cint(axis), x.S.c)) {
 		C.mlx_array_free(res)
 		return x.empty()
 	}
@@ -234,12 +234,12 @@ func (x *Ctx) SplitAt(a *Array, axis int, indices ...int) []*Array {
 	defer freeInts(ip)
 	vec := C.mlx_vector_array_new()
 	defer C.mlx_vector_array_free(vec)
-	if !x.check("split", C.mlx_split_sections(&vec, a.c, ip, in, C.int(axis), x.S.c)) {
+	if !x.check("split", C.mlx_split_sections(&vec, a.c, ip, in, cint(axis), x.S.c)) {
 		return fill()
 	}
 	for i := 0; i < n; i++ {
 		el := C.mlx_array_new()
-		if !x.check("split", C.mlx_vector_array_get(&el, vec, C.size_t(i))) {
+		if !x.check("split", C.mlx_vector_array_get(&el, vec, csize(i))) {
 			C.mlx_array_free(el)
 			return fill()
 		}
@@ -279,7 +279,7 @@ func (x *Ctx) Take(a, indices *Array, axis int) *Array {
 		return x.empty()
 	}
 	res := C.mlx_array_new()
-	if !x.check("take", C.mlx_take_axis(&res, a.c, indices.c, C.int(axis), x.S.c)) {
+	if !x.check("take", C.mlx_take_axis(&res, a.c, indices.c, cint(axis), x.S.c)) {
 		C.mlx_array_free(res)
 		return x.empty()
 	}
@@ -292,7 +292,7 @@ func (x *Ctx) Arange(start, stop, step float64, dt DType) *Array {
 		return x.empty()
 	}
 	res := C.mlx_array_new()
-	if !x.check("arange", C.mlx_arange(&res, C.double(start), C.double(stop), C.double(step), C.mlx_dtype(dt), x.S.c)) {
+	if !x.check("arange", C.mlx_arange(&res, C.double(start), C.double(stop), C.double(step), cdtype(dt), x.S.c)) {
 		C.mlx_array_free(res)
 		return x.empty()
 	}
@@ -307,7 +307,7 @@ func (x *Ctx) Zeros(dt DType, shape ...int) *Array {
 	sp, sn := cInts(shape)
 	defer freeInts(sp)
 	res := C.mlx_array_new()
-	if !x.check("zeros", C.mlx_zeros(&res, sp, sn, C.mlx_dtype(dt), x.S.c)) {
+	if !x.check("zeros", C.mlx_zeros(&res, sp, sn, cdtype(dt), x.S.c)) {
 		C.mlx_array_free(res)
 		return x.empty()
 	}
@@ -333,7 +333,7 @@ func (x *Ctx) Cumsum(a *Array, axis int, reverse, inclusive bool) *Array {
 		return x.empty()
 	}
 	res := C.mlx_array_new()
-	if !x.check("cumsum", C.mlx_cumsum(&res, a.c, C.int(axis), C.bool(reverse), C.bool(inclusive), x.S.c)) {
+	if !x.check("cumsum", C.mlx_cumsum(&res, a.c, cint(axis), C.bool(reverse), C.bool(inclusive), x.S.c)) {
 		C.mlx_array_free(res)
 		return x.empty()
 	}
@@ -346,7 +346,7 @@ func (x *Ctx) Tril(a *Array, k int) *Array {
 		return x.empty()
 	}
 	res := C.mlx_array_new()
-	if !x.check("tril", C.mlx_tril(&res, a.c, C.int(k), x.S.c)) {
+	if !x.check("tril", C.mlx_tril(&res, a.c, cint(k), x.S.c)) {
 		C.mlx_array_free(res)
 		return x.empty()
 	}
@@ -362,7 +362,7 @@ func (x *Ctx) Conv1d(in, w *Array, stride, padding, dilation, groups int) *Array
 		return x.empty()
 	}
 	res := C.mlx_array_new()
-	if !x.check("conv1d", C.mlx_conv1d(&res, in.c, w.c, C.int(stride), C.int(padding), C.int(dilation), C.int(groups), x.S.c)) {
+	if !x.check("conv1d", C.mlx_conv1d(&res, in.c, w.c, cint(stride), cint(padding), cint(dilation), cint(groups), x.S.c)) {
 		C.mlx_array_free(res)
 		return x.empty()
 	}
@@ -397,8 +397,8 @@ func (x *Ctx) RoPE(a *Array, dims int, traditional bool, base, scale float32, of
 		return x.empty()
 	}
 	res := C.mlx_array_new()
-	if !x.check("rope", C.mlx_fast_rope(&res, a.c, C.int(dims), C.bool(traditional),
-		C.vakt_opt_float(C.float(base), C.bool(true)), C.float(scale), C.int(offset), C.vakt_null_array(), x.S.c)) {
+	if !x.check("rope", C.mlx_fast_rope(&res, a.c, cint(dims), C.bool(traditional),
+		C.vakt_opt_float(C.float(base), C.bool(true)), C.float(scale), cint(offset), C.vakt_null_array(), x.S.c)) {
 		C.mlx_array_free(res)
 		return x.empty()
 	}

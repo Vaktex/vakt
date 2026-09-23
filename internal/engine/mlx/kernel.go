@@ -93,22 +93,22 @@ func (x *Ctx) Apply(k *Kernel, inputs []*Array, l KernelLaunch) []*Array {
 	defer C.mlx_fast_metal_kernel_config_free(cfg)
 	for _, o := range l.Outputs {
 		sp, sn := cInts(o.Shape)
-		C.mlx_fast_metal_kernel_config_add_output_arg(cfg, sp, sn, C.mlx_dtype(o.Dtype))
+		C.mlx_fast_metal_kernel_config_add_output_arg(cfg, sp, sn, cdtype(o.Dtype))
 		freeInts(sp)
 	}
-	C.mlx_fast_metal_kernel_config_set_grid(cfg, C.int(l.Grid[0]), C.int(l.Grid[1]), C.int(l.Grid[2]))
-	C.mlx_fast_metal_kernel_config_set_thread_group(cfg, C.int(l.ThreadGroup[0]), C.int(l.ThreadGroup[1]), C.int(l.ThreadGroup[2]))
+	C.mlx_fast_metal_kernel_config_set_grid(cfg, cint(l.Grid[0]), cint(l.Grid[1]), cint(l.Grid[2]))
+	C.mlx_fast_metal_kernel_config_set_thread_group(cfg, cint(l.ThreadGroup[0]), cint(l.ThreadGroup[1]), cint(l.ThreadGroup[2]))
 	if l.InitValue != nil {
 		C.mlx_fast_metal_kernel_config_set_init_value(cfg, C.float(*l.InitValue))
 	}
 	for name, v := range l.TemplateInts {
 		cs := C.CString(name)
-		C.mlx_fast_metal_kernel_config_add_template_arg_int(cfg, cs, C.int(v))
+		C.mlx_fast_metal_kernel_config_add_template_arg_int(cfg, cs, cint(v))
 		C.free(unsafe.Pointer(cs))
 	}
 	for name, dt := range l.TemplateDtypes {
 		cs := C.CString(name)
-		C.mlx_fast_metal_kernel_config_add_template_arg_dtype(cfg, cs, C.mlx_dtype(dt))
+		C.mlx_fast_metal_kernel_config_add_template_arg_dtype(cfg, cs, cdtype(dt))
 		C.free(unsafe.Pointer(cs))
 	}
 	in := C.mlx_vector_array_new()
@@ -123,7 +123,7 @@ func (x *Ctx) Apply(k *Kernel, inputs []*Array, l KernelLaunch) []*Array {
 	}
 	for i := range outs {
 		el := C.mlx_array_new()
-		if !x.check(op, C.mlx_vector_array_get(&el, res, C.size_t(i))) {
+		if !x.check(op, C.mlx_vector_array_get(&el, res, csize(i))) {
 			C.mlx_array_free(el)
 			return fill()
 		}

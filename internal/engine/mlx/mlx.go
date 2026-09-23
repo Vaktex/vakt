@@ -206,7 +206,7 @@ func (a *Array) Shape() []int {
 	if !a.Valid() {
 		return nil
 	}
-	n := int(C.mlx_array_ndim(a.c))
+	n := goint(C.mlx_array_ndim(a.c))
 	if n == 0 {
 		return []int{}
 	}
@@ -215,6 +215,7 @@ func (a *Array) Shape() []int {
 	for i, v := range p {
 		out[i] = int(v)
 	}
+	runtime.KeepAlive(a) // a's cleanup must not run while p is read
 	return out
 }
 
@@ -223,7 +224,7 @@ func (a *Array) Size() int {
 	if !a.Valid() {
 		return 0
 	}
-	return int(C.mlx_array_size(a.c))
+	return goint(C.mlx_array_size(a.c))
 }
 
 // Dtype returns the element type.
@@ -351,6 +352,33 @@ func (x *Ctx) binary(op string, f binaryFn, a, b *Array) *Array {
 // shape, axis or index derived from validated model constants and bounded
 // token counts (<= core.MaxTokens); values outside int32 are clamped so a
 // logic error surfaces as an MLX shape error rather than silent wraparound.
+// cint converts one value for mlx-c, mapping anything outside int32 to -1
+// (rejected by every mlx-c shape/axis/grid parameter).
+func cint(v int) C.int {
+	if v > math.MaxInt32 || v < math.MinInt32 {
+		return -1
+	}
+	return C.int(v) // #nosec G115 -- range checked above
+}
+
+// cdtype converts one of the DType constants above (a closed enum).
+func cdtype(d DType) C.mlx_dtype {
+	return C.mlx_dtype(d) // #nosec G115 -- closed enum of mlx_dtype values
+}
+
+// csize converts a non-negative Go length/index.
+func csize(n int) C.size_t {
+	if n < 0 {
+		return 0
+	}
+	return C.size_t(n) // #nosec G115 -- n >= 0
+}
+
+// goint converts an mlx-c size_t count (bounded by array sizes <= 2^34).
+func goint(n C.size_t) int {
+	return int(n) // #nosec G115 -- MLX array sizes are far below MaxInt
+}
+
 func cInts(v []int) (*C.int, C.size_t) {
 	if len(v) == 0 {
 		return nil, 0
@@ -360,12 +388,12 @@ func cInts(v []int) (*C.int, C.size_t) {
 			v[i] = -1 // invalid for every mlx-c shape/axis parameter
 		}
 	}
-	p := (*C.int)(C.malloc(C.size_t(len(v)) * C.size_t(unsafe.Sizeof(C.int(0)))))
+	p := (*C.int)(C.malloc(csize(len(v)) * C.size_t(unsafe.Sizeof(C.int(0)))))
 	s := unsafe.Slice(p, len(v))
 	for i, x := range v {
-		s[i] = C.int(x)
+		s[i] = C.int(x) // #nosec G115 -- clamped to int32 range above
 	}
-	return p, C.size_t(len(v))
+	return p, csize(len(v))
 }
 
 func freeInts(p *C.int) {
@@ -375,15 +403,17 @@ func freeInts(p *C.int) {
 }
 
 func checkShape(n int, shape []int) error {
+	const maxElems = 1 << 34
 	total := 1
 	for _, d := range shape {
 		if d < 0 || d > 1<<30 {
 			return fmt.Errorf("invalid dimension %d", d)
 		}
-		total *= d
-		if total > 1<<34 {
+		// Check before multiplying so the product can never wrap.
+		if d != 0 && total > maxElems/d {
 			return errors.New("shape too large")
 		}
+		total *= d
 	}
 	if total != n {
 		return fmt.Errorf("data length %d does not match shape %v", n, shape)
@@ -421,14 +451,14 @@ func (x *Ctx) fromData(op string, p unsafe.Pointer, n int, shape []int, dt DType
 	defer freeInts(sp)
 	// mlx_array_new_data copies the buffer, so the Go memory need only live
 	// for the duration of the call (cgo pins it).
-	return x.track(C.mlx_array_new_data(p, sp, C.int(sn), C.mlx_dtype(dt)))
+	return x.track(C.mlx_array_new_data(p, sp, C.int(sn), cdtype(dt))) // #nosec G115 -- sn = len(shape) <= 8
 }
 
 // Scalar returns a 0-d float32 array.
 func (x *Ctx) Scalar(v float32) *Array { return x.track(C.mlx_array_new_float32(C.float(v))) }
 
 // ScalarInt returns a 0-d int32 array.
-func (x *Ctx) ScalarInt(v int) *Array { return x.track(C.mlx_array_new_int(C.int(v))) }
+func (x *Ctx) ScalarInt(v int) *Array { return x.track(C.mlx_array_new_int(cint(v))) }
 
 // ---------------------------------------------------------------- evaluation
 
@@ -468,6 +498,7 @@ func (x *Ctx) Float32s(a *Array) ([]float32, error) {
 	if n > 0 {
 		copy(out, unsafe.Slice((*float32)(unsafe.Pointer(p)), n))
 	}
+	runtime.KeepAlive(a) // a's cleanup must not run while p is read
 	return out, nil
 }
 
