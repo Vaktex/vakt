@@ -64,18 +64,38 @@ func Extract(ctx context.Context, rel, lang string, src []byte, opts Options) (u
 	if p == nil {
 		return []core.Unit{fileUnit(rel, lang, src)}, nil
 	}
-	defer g.pool.Put(p)
-
-	pctx, cancel := context.WithTimeout(ctx, opts.ParseTimeout)
-	defer cancel()
-	tree := p.ParseCtx(pctx, src, nil)
-	if tree == nil {
-		p.Reset() // clear the cancellation state before reuse
+	// Bound the parse with tree-sitter's progress callback rather than
+	// ParseCtx: ParseCtx cancels through a flag written from a watcher
+	// goroutine that can outlive the parse and race with the parser's
+	// reuse from the pool.
+	deadline := time.Now().Add(opts.ParseTimeout)
+	timedOut := false
+	popts := &ts.ParseOptions{ProgressCallback: func(ts.ParseState) bool {
+		if ctx.Err() != nil || time.Now().After(deadline) {
+			timedOut = true
+			return true // stop parsing
+		}
+		return false
+	}}
+	tree := p.ParseWithOptions(func(off int, _ ts.Point) []byte {
+		if off >= len(src) {
+			return nil
+		}
+		return src[off:]
+	}, nil, popts)
+	if tree == nil || timedOut {
+		if tree != nil {
+			tree.Close()
+		}
+		// A stopped parser resumes by default: reset before returning it.
+		p.Reset()
+		g.pool.Put(p)
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
 		return []core.Unit{fileUnit(rel, lang, src)}, ErrParseTimeout
 	}
+	defer g.pool.Put(p)
 	defer tree.Close()
 
 	x := &extractor{g: g, src: src, rel: rel, lang: lang}
@@ -111,15 +131,21 @@ func (x *extractor) walk(n *ts.Node, class string, depth int) {
 	if n == nil || depth > maxDepth || len(x.units) > MaxUnitsPerFile {
 		return
 	}
+	if !n.IsNamed() {
+		return // keywords and punctuation (e.g. the `class` token)
+	}
 	kind := n.Kind()
 	switch {
 	case x.g.wraps[kind]:
 		// A wrapper (decorator/export/template) around a definition: emit
 		// the definition with the wrapper's span.
 		if def := x.findDef(n); def != nil {
-			if x.g.classes[def.Kind()] {
+			switch {
+			case x.g.classes[def.Kind()]:
 				x.classUnit(def, n, class, depth)
-			} else {
+			case x.g.assign[def.Kind()]:
+				x.emitNamed(n, x.declName(def), class, kindFor(class))
+			default:
 				x.emit(def, n, class)
 			}
 			return
@@ -136,8 +162,8 @@ func (x *extractor) walk(n *ts.Node, class string, depth int) {
 			return
 		}
 	}
-	for i := uint(0); i < n.ChildCount(); i++ {
-		x.walk(n.Child(i), class, depth+1)
+	for _, c := range children(n, true) {
+		x.walk(c, class, depth+1)
 	}
 }
 
@@ -152,8 +178,8 @@ func (x *extractor) classUnit(cls, span *ts.Node, outer string, depth int) {
 		full = outer
 	}
 	before := len(x.units)
-	for i := uint(0); i < cls.ChildCount(); i++ {
-		x.walk(cls.Child(i), full, depth+1)
+	for _, c := range children(cls, true) {
+		x.walk(c, full, depth+1)
 	}
 	if len(x.units) == before && cls.Kind() != "namespace_definition" && cls.Kind() != "namespace_declaration" &&
 		cls.Kind() != "file_scoped_namespace_declaration" && cls.Kind() != "module" {
@@ -170,11 +196,7 @@ func kindFor(class string) string {
 
 // findDef returns the first function or class inside a wrapper.
 func (x *extractor) findDef(n *ts.Node) *ts.Node {
-	for i := uint(0); i < n.NamedChildCount(); i++ {
-		c := n.NamedChild(i)
-		if c == nil {
-			continue
-		}
+	for _, c := range children(n, true) {
 		k := c.Kind()
 		if x.g.funcs[k] || x.g.classes[k] {
 			return c
@@ -194,9 +216,8 @@ func (x *extractor) findDef(n *ts.Node) *ts.Node {
 // boundFunction returns the anonymous function bound by a declaration
 // (const f = () => {}), or nil.
 func (x *extractor) boundFunction(n *ts.Node) *ts.Node {
-	for i := uint(0); i < n.NamedChildCount(); i++ {
-		d := n.NamedChild(i)
-		if d == nil || d.Kind() != "variable_declarator" {
+	for _, d := range children(n, true) {
+		if d.Kind() != "variable_declarator" {
 			continue
 		}
 		if v := d.ChildByFieldName("value"); v != nil && x.g.anon[v.Kind()] {
@@ -207,8 +228,8 @@ func (x *extractor) boundFunction(n *ts.Node) *ts.Node {
 }
 
 func (x *extractor) declName(n *ts.Node) string {
-	for i := uint(0); i < n.NamedChildCount(); i++ {
-		if d := n.NamedChild(i); d != nil && d.Kind() == "variable_declarator" {
+	for _, d := range children(n, true) {
+		if d.Kind() == "variable_declarator" {
 			if nm := d.ChildByFieldName("name"); nm != nil {
 				return x.text(nm)
 			}
@@ -261,7 +282,7 @@ func (x *extractor) emitNamed(span *ts.Node, name, class, kind string) {
 // (no blank line in between).
 func (x *extractor) leadingComments(n *ts.Node) *ts.Node {
 	first := n
-	for p := n.PrevSibling(); p != nil && x.g.comment[p.Kind()]; p = p.PrevSibling() {
+	for i, p := 0, n.PrevSibling(); p != nil && i < 64 && x.g.comment[p.Kind()]; i, p = i+1, p.PrevSibling() {
 		gap := x.src[p.EndByte():first.StartByte()]
 		if bytes.Count(gap, []byte("\n")) > 1 {
 			break
@@ -289,11 +310,7 @@ func (x *extractor) nameOf(n *ts.Node) string {
 			return x.text(d)
 		}
 	}
-	for i := uint(0); i < n.NamedChildCount(); i++ {
-		c := n.NamedChild(i)
-		if c == nil {
-			continue
-		}
+	for _, c := range children(n, true) {
 		switch c.Kind() {
 		case "identifier", "type_identifier", "simple_identifier", "name", "constant", "field_identifier", "property_identifier":
 			return x.text(c)
@@ -305,9 +322,8 @@ func (x *extractor) nameOf(n *ts.Node) string {
 // hclName renders `resource "aws_s3_bucket" "logs"` as aws_s3_bucket.logs.
 func (x *extractor) hclName(n *ts.Node) string {
 	var parts []string
-	for i := uint(0); i < n.NamedChildCount(); i++ {
-		c := n.NamedChild(i)
-		if c == nil || c.Kind() == "body" || c.Kind() == "block_start" {
+	for _, c := range children(n, true) {
+		if c.Kind() == "body" || c.Kind() == "block_start" {
 			break
 		}
 		parts = append(parts, strings.Trim(x.text(c), `"`))
@@ -408,4 +424,25 @@ func clean(s string) string {
 		s = s[:len(s)-size]
 	}
 	return s
+}
+
+// children returns n's children (or named children) in order using a tree
+// cursor: Node.Child(i) is O(i) in tree-sitter, so index loops are
+// quadratic on wide nodes (e.g. 20k siblings in hostile input).
+func children(n *ts.Node, namedOnly bool) []*ts.Node {
+	c := n.Walk()
+	defer c.Close()
+	if !c.GotoFirstChild() {
+		return nil
+	}
+	var out []*ts.Node
+	for {
+		node := c.Node()
+		if !namedOnly || node.IsNamed() {
+			out = append(out, node)
+		}
+		if !c.GotoNextSibling() {
+			return out
+		}
+	}
 }
