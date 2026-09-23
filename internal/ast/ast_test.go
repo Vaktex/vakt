@@ -413,3 +413,31 @@ func TestVBAProvenance(t *testing.T) {
 		t.Fatalf("parser.c sha256 %s; update third_party/tree-sitter-vba/binding.go and README", got)
 	}
 }
+
+func TestPathologicalBypasses(t *testing.T) {
+	pay := strings.Repeat("A<", 40000)
+	for _, c := range []struct{ lang, src string }{
+		{"Java", "class C { void m() { " + strings.Repeat(">", 40000) + "\n" + pay},
+		{"Java", "class C { String s = \"\"\"\n\"\n\"\"\"; " + pay},
+		{"C#", "class C { string s = @\"\\\"; " + pay},
+		{"C++", "auto s = R\"x(\")x\"; " + pay},
+		{"Rust", "fn f() { let c = '\"'; " + pay},
+		{"JavaScript", "let r = /\"/; " + pay},
+		{"Kotlin", "val s = \"\"\"\"a\"\"\"; " + pay},
+	} {
+		if !pathological(c.lang, []byte(c.src)) {
+			t.Errorf("%s bypass not caught: %.40q", c.lang, c.src)
+		}
+	}
+}
+
+func TestShortTopLevelPayloadScored(t *testing.T) {
+	src := "function f() {\n  return 1\n}\n" + strings.Repeat("require('child_process').exec(process.env.X);", 10) + "\n"
+	units, _ := Extract(context.Background(), "a.js", "JavaScript", []byte(src), Options{})
+	for _, u := range units {
+		if u.Kind == core.KindResidual && strings.Contains(u.Code, "child_process") {
+			return
+		}
+	}
+	t.Fatalf("one-line top-level payload not scored: %+v", units)
+}

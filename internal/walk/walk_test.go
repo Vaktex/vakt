@@ -2,6 +2,7 @@ package walk
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -460,4 +461,104 @@ func TestIgnoreWorkBudget(t *testing.T) {
 		t.Fatalf("py files %d", py)
 	}
 	t.Logf("took %v, skip on '.': %q", time.Since(start), r.skips["."])
+}
+
+// H2: anchored "**" patterns are charged per path rune, so deep trees trip
+// the budget instead of burning minutes of CPU.
+func TestAnchoredIgnoreCharged(t *testing.T) {
+	root := t.TempDir()
+	var b strings.Builder
+	for i := 0; i < 100; i++ {
+		b.WriteString("**/*" + strings.Repeat("a", 120) + "b/**\n")
+	}
+	writeFile(t, root, ".gitignore", []byte(b.String()))
+	// 60 levels of 240-byte names exceed PATH_MAX; build it with
+	// relative mkdirat-style steps (the walker itself uses openat).
+	cur, err := os.OpenRoot(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	name := strings.Repeat("a", 240)
+	for d := 0; d < 60; d++ {
+		if err := cur.Mkdir(name, 0o750); err != nil {
+			t.Fatal(err)
+		}
+		next, err := cur.OpenRoot(name)
+		cur.Close()
+		if err != nil {
+			t.Fatal(err)
+		}
+		cur = next
+	}
+	for f := 0; f < 100; f++ {
+		if err := cur.WriteFile(string(rune('a'+f%26))+string(rune('a'+f/26))+".py", []byte("x = 1\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cur.Close()
+	start := time.Now()
+	r := collect(t, context.Background(), root, Options{})
+	if d := time.Since(start); d > 10*time.Second {
+		t.Fatalf("took %v", d)
+	}
+	t.Logf("took %v files=%d dot=%q", time.Since(start), len(r.files), r.skips["."])
+}
+
+// M2: once the budget decides, results are the same on every run.
+func TestIgnoreBudgetDeterministic(t *testing.T) {
+	root := t.TempDir()
+	var b strings.Builder
+	for i := 0; i < 4144; i++ {
+		b.WriteString("*" + strings.Repeat("a", 200) + "b\n")
+	}
+	b.WriteString("hide*\n")
+	writeFile(t, root, ".gitignore", []byte(b.String()))
+	for d := 0; d < 80; d++ {
+		for f := 0; f < 3; f++ {
+			writeFile(t, root, fmt.Sprintf("hide%02d/%s%d.py", d, strings.Repeat("a", 150), f), []byte("x = 1\n"))
+		}
+	}
+	var first []string
+	for run := 0; run < 5; run++ {
+		got := keys(collect(t, context.Background(), root, Options{}).files)
+		if run == 0 {
+			first = got
+		} else if !slices.Equal(got, first) {
+			t.Fatalf("run %d: %d files vs %d", run, len(got), len(first))
+		}
+	}
+}
+
+// M3: an ignore file cut at the size cap must not apply its half last line.
+func TestIgnoreTruncatedLastLineDropped(t *testing.T) {
+	root := t.TempDir()
+	// Comments fill the file up to 4 bytes before the cap, then a pattern
+	// whose first 3 bytes ("**/") are all that fit.
+	fill := maxIgnoreFileBytes - 3
+	pad := strings.Repeat("#", fill-1) + "\n" + "**/*aaaaaaaaaa.py\n"
+	if len(pad) <= maxIgnoreFileBytes || pad[maxIgnoreFileBytes-3:maxIgnoreFileBytes] != "**/" {
+		t.Fatalf("bad fixture: %q", pad[maxIgnoreFileBytes-6:maxIgnoreFileBytes])
+	}
+	writeFile(t, root, ".gitignore", []byte(pad))
+	writeFile(t, root, "keep/x.py", []byte("x = 1\n"))
+	out := make(chan File, 16)
+	skipped := make(chan Skip, 16)
+	if err := Walk(context.Background(), root, Options{}, out, skipped); err != nil {
+		t.Fatal(err)
+	}
+	close(out)
+	close(skipped)
+	kept, reported := false, false
+	for f := range out {
+		kept = kept || f.Rel == "keep/x.py"
+	}
+	for sk := range skipped {
+		reported = reported || (sk.Rel == ".gitignore" && sk.Reason == ReasonIgnoreCap)
+	}
+	if !kept {
+		t.Fatal("half pattern applied: keep/x.py hidden")
+	}
+	if !reported {
+		t.Error("truncation not reported")
+	}
 }

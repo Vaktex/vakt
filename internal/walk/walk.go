@@ -145,7 +145,7 @@ type walker struct {
 	visited map[string]bool // real dirs already walked (FollowSymlinks only)
 	budget  atomic.Int64    // ignore patterns still allowed in this walk
 	meter   matchMeter      // ignore matching work still allowed in this walk
-	offOnce sync.Once
+	dry     bool            // budget probe: evaluate ignores only, no reads or output
 }
 
 // Walk walks root and sends every scannable file on out and every skipped
@@ -184,6 +184,33 @@ func Walk(ctx context.Context, root string, opts Options, out chan<- File, skipp
 		return fmt.Errorf("walk: %w", err)
 	}
 	defer fsRoot.Close()
+	if !opts.NoRepoIgnores {
+		// The tree's ignore files decide what is hidden, under a work
+		// budget. A dry pass (no reads, nothing emitted) finds out whether
+		// they stay within it; if not, the real walk disregards them all,
+		// so the result never depends on where or when the budget ran out.
+		dry := newWalker(ctx, real, fsRoot, opts, nil, nil)
+		dry.dry = true
+		dry.run()
+		if dry.meter.out.Load() {
+			opts.NoRepoIgnores = true
+			if skipped != nil {
+				select {
+				case skipped <- Skip{Rel: ".", Reason: ReasonIgnoreOff}:
+				case <-ctx.Done():
+				}
+			}
+		}
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+	}
+	w := newWalker(ctx, real, fsRoot, opts, out, skipped)
+	w.run()
+	return ctx.Err()
+}
+
+func newWalker(ctx context.Context, real string, fsRoot *os.Root, opts Options, out chan<- File, skipped chan<- Skip) *walker {
 	w := &walker{
 		ctx:     ctx,
 		root:    real,
@@ -196,18 +223,21 @@ func Walk(ctx context.Context, root string, opts Options, out chan<- File, skipp
 	}
 	w.budget.Store(maxPatternsPerWalk)
 	w.meter.left.Store(maxMatchSteps)
+	return w
+}
+
+func (w *walker) run() {
 	var chain *ignoreChain
-	if !opts.NoRepoIgnores {
+	if !w.opts.NoRepoIgnores {
 		// Only a real .git directory: a .git symlink could point at another
 		// tree's exclude file.
-		if st, err := fsRoot.Lstat(".git"); err == nil && st.IsDir() {
+		if st, err := w.fs.Lstat(".git"); err == nil && st.IsDir() {
 			chain = chain.push(w.readIgnore(".git/info/exclude", ""))
 		}
 	}
 	w.wg.Add(1)
 	w.walkDir(".", "", chain, 0)
 	w.wg.Wait()
-	return ctx.Err()
 }
 
 // walkDir processes one directory. dir is the real path to read, rel its
@@ -394,6 +424,9 @@ func (w *walker) file(path, rel string, typ fs.FileMode, chain *ignoreChain) {
 // and minified tests and emits it with its contents. path is relative to
 // the root.
 func (w *walker) check(path, rel string) {
+	if w.dry {
+		return
+	}
 	// O_NONBLOCK keeps a FIFO swapped in after the type check from blocking;
 	// the Root refuses any path that resolves outside the root.
 	f, err := w.fs.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK, 0)
@@ -480,6 +513,9 @@ func (w *walker) emit(f File) {
 }
 
 func (w *walker) skip(rel, reason string) {
+	if w.dry {
+		return
+	}
 	if rel == "" {
 		rel = "."
 	}
@@ -527,7 +563,7 @@ func (w *walker) readIgnore(path, base string) *ignoreFile {
 	if st, err := f.Stat(); err != nil || !st.Mode().IsRegular() {
 		return nil
 	}
-	data, err := io.ReadAll(io.LimitReader(f, maxIgnoreFileBytes))
+	data, err := io.ReadAll(io.LimitReader(f, maxIgnoreFileBytes+1)) // +1: detect truncation
 	if err != nil {
 		return nil
 	}
@@ -546,18 +582,12 @@ func (w *walker) readIgnore(path, base string) *ignoreFile {
 // ignored applies the repository's ignore rules under the walk's work
 // budget, reporting once when they are switched off.
 func (w *walker) ignored(chain *ignoreChain, rel string, isDir bool) bool {
-	if w.meter.out.Load() {
-		w.ignoresOff()
-		return false
+	if w.dry {
+		// Probe the budget; the meter is monotone, so the total charged is
+		// the same in any order and the verdict is deterministic.
+		return chain.ignoredMetered(rel, isDir, &w.meter)
 	}
-	ig := chain.ignoredMetered(rel, isDir, &w.meter)
-	if w.meter.out.Load() {
-		w.ignoresOff()
-		return false
-	}
-	return ig
-}
-
-func (w *walker) ignoresOff() {
-	w.offOnce.Do(func() { w.skip(".", ReasonIgnoreOff) })
+	// The dry pass proved these rules fit the budget (the real walk visits
+	// the same paths with the same rules), so no metering here.
+	return chain.ignored(rel, isDir)
 }
