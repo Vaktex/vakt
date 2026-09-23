@@ -1,6 +1,7 @@
 package ast
 
 import (
+	"strings"
 	"sync"
 	"unsafe"
 
@@ -46,6 +47,10 @@ type spec struct {
 	comments []string
 }
 
+// tsxSpec is TypeScript with JSX; used for .tsx files only (the TSX grammar
+// misparses `<T>expr` type assertions in plain .ts files).
+var tsxSpec *spec
+
 var specs = map[string]*spec{
 	"Python": {lang: tspython.Language, funcs: []string{"function_definition"}, classes: []string{"class_definition"},
 		wrappers: []string{"decorated_definition"}, comments: []string{"comment"}},
@@ -53,7 +58,7 @@ var specs = map[string]*spec{
 		classes: []string{"class_declaration", "class"}, wrappers: []string{"export_statement"},
 		assign: []string{"lexical_declaration", "variable_declaration"}, anon: []string{"arrow_function", "function_expression", "function"},
 		comments: []string{"comment"}},
-	"TypeScript": {lang: tsts.LanguageTSX, funcs: []string{"function_declaration", "generator_function_declaration", "method_definition", "function_signature"},
+	"TypeScript": {lang: tsts.LanguageTypescript, funcs: []string{"function_declaration", "generator_function_declaration", "method_definition", "function_signature"},
 		classes: []string{"class_declaration", "abstract_class_declaration", "class"}, wrappers: []string{"export_statement"},
 		assign: []string{"lexical_declaration", "variable_declaration"}, anon: []string{"arrow_function", "function_expression", "function"},
 		comments: []string{"comment"}},
@@ -88,7 +93,7 @@ var specs = map[string]*spec{
 type grammar struct {
 	spec    *spec
 	lang    *ts.Language
-	pool    sync.Pool
+	pool    parserPool
 	funcs   map[string]bool
 	classes map[string]bool
 	wraps   map[string]bool
@@ -111,28 +116,81 @@ func set(xs []string) map[string]bool {
 }
 
 func loadGrammars() {
-	grammars = make(map[string]*grammar, len(specs))
+	ts2 := *specs["TypeScript"]
+	ts2.lang = tsts.LanguageTSX
+	tsxSpec = &ts2
+	grammars = make(map[string]*grammar, len(specs)+1)
 	for name, sp := range specs {
-		g := &grammar{
-			spec: sp, lang: ts.NewLanguage(sp.lang()),
-			funcs: set(sp.funcs), classes: set(sp.classes), wraps: set(sp.wrappers),
-			assign: set(sp.assign), anon: set(sp.anon), comment: set(sp.comments),
-		}
-		g.pool.New = func() any {
-			p := ts.NewParser()
-			if err := p.SetLanguage(g.lang); err != nil {
-				p.Close()
-				return nil
-			}
-			return p
-		}
-		grammars[name] = g
+		grammars[name] = newGrammar(sp)
 	}
+	grammars["\x00tsx"] = newGrammar(tsxSpec)
+}
+
+func newGrammar(sp *spec) *grammar {
+	g := &grammar{
+		spec: sp, lang: ts.NewLanguage(sp.lang()),
+		funcs: set(sp.funcs), classes: set(sp.classes), wraps: set(sp.wrappers),
+		assign: set(sp.assign), anon: set(sp.anon), comment: set(sp.comments),
+	}
+	g.pool.lang = g.lang
+	return g
+}
+
+// parserPool is a bounded free list of parsers. sync.Pool would drop idle
+// parsers at GC without calling Close, leaking their C allocations; here
+// every parser is either reused or explicitly closed.
+type parserPool struct {
+	lang *ts.Language
+	mu   sync.Mutex
+	free []*ts.Parser
+}
+
+const maxIdleParsers = 64
+
+func (p *parserPool) Get() any {
+	p.mu.Lock()
+	if n := len(p.free); n > 0 {
+		pr := p.free[n-1]
+		p.free = p.free[:n-1]
+		p.mu.Unlock()
+		return pr
+	}
+	p.mu.Unlock()
+	pr := ts.NewParser()
+	if err := pr.SetLanguage(p.lang); err != nil {
+		pr.Close()
+		return nil
+	}
+	return pr
+}
+
+func (p *parserPool) Put(v any) {
+	pr, _ := v.(*ts.Parser)
+	if pr == nil {
+		return
+	}
+	p.mu.Lock()
+	if len(p.free) < maxIdleParsers {
+		p.free = append(p.free, pr)
+		p.mu.Unlock()
+		return
+	}
+	p.mu.Unlock()
+	pr.Close()
 }
 
 func grammarFor(lang string) *grammar {
 	grammarsOnce.Do(loadGrammars)
 	return grammars[lang]
+}
+
+// grammarForFile picks the TSX grammar for .tsx files.
+func grammarForFile(rel, lang string) *grammar {
+	if lang == "TypeScript" && strings.HasSuffix(strings.ToLower(rel), ".tsx") {
+		grammarsOnce.Do(loadGrammars)
+		return grammars["\x00tsx"]
+	}
+	return grammarFor(lang)
 }
 
 // Languages returns the languages that have a grammar.

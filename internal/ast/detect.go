@@ -39,7 +39,7 @@ var extLang = map[string]string{
 	".bas": "VBA", ".cls": "VBA", ".frm": "VBA", ".vba": "VBA",
 	".vb": "VB.NET", ".vbs": "VBScript",
 	".m": "Objective-C", ".mm": "Objective-C",
-	".dart": "Dart", ".ex": "Elixir", ".exs": "Elixir", ".erl": "Erlang",
+	".dart": "Dart", ".ex": "Elixir", ".exs": "Elixir",
 	".groovy": "Groovy", ".gradle": "Groovy", ".jl": "Julia", ".nim": "Nim",
 	".pl": "Perl", ".pm": "Perl", ".ps1": "PowerShell", ".psm1": "PowerShell",
 	".r": "R", ".zig": "Zig", ".v": "V", ".vy": "Vyper", ".move": "Move", ".cairo": "Cairo",
@@ -119,6 +119,9 @@ func detect(rel string, head []byte) (string, bool) {
 		return "", false
 	}
 	if l, ok := extLang[ext]; ok {
+		if ext == ".cls" && looksApex(head) {
+			return "Apex", true
+		}
 		if ext == ".h" && looksCPP(head) {
 			return "C++", true
 		}
@@ -131,6 +134,20 @@ func detect(rel string, head []byte) (string, bool) {
 		return shebang(head)
 	}
 	return "", false
+}
+
+// looksApex tells Salesforce Apex classes (.cls) from VBA class modules.
+func looksApex(head []byte) bool {
+	h := bytes.ToLower(head)
+	if bytes.Contains(h, []byte("attribute vb_")) || bytes.Contains(h, []byte("version 1.0 class")) {
+		return false
+	}
+	for _, k := range [][]byte{[]byte("public class "), []byte("global class "), []byte("with sharing"), []byte("without sharing"), []byte("@istest"), []byte("private class ")} {
+		if bytes.Contains(h, k) {
+			return true
+		}
+	}
+	return false
 }
 
 func looksCPP(head []byte) bool {

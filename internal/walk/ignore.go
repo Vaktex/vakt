@@ -3,6 +3,7 @@ package walk
 import (
 	"bytes"
 	"strings"
+	"sync/atomic"
 	"unicode/utf8"
 )
 
@@ -26,14 +27,52 @@ import (
 // Everything is linear or O(len(pattern)*len(path)); nothing backtracks
 // exponentially, because ignore files come from untrusted repositories.
 
-// maxIgnoreFileBytes caps how much of one ignore file is read.
-const maxIgnoreFileBytes = 1 << 20
+// Limits on untrusted ignore files. Real repositories stay far below them
+// (the largest .gitignore in common use has a few hundred patterns).
+const (
+	maxIgnoreFileBytes    = 1 << 20 // bytes read from one ignore file
+	maxPatternsPerFile    = 10_000
+	maxSegmentsPerPattern = 64
+	maxPatternsPerWalk    = 100_000
+	maxPatternRunes       = 4096
+)
 
 type ignorePattern struct {
-	segs     []string // anchored: path segments; unanchored: exactly one segment
+	segs     []seg // anchored: path segments; unanchored: exactly one segment
 	anchored bool
 	negate   bool
 	dirOnly  bool
+}
+
+// seg is one pattern segment, pre-converted for matching.
+type seg struct {
+	raw   string
+	runes []rune // nil when raw has no wildcard (plain string compare)
+	star  bool   // "*" or "**" (matches any single segment)
+	glob2 bool   // "**"
+}
+
+func newSeg(s string) seg {
+	g := seg{raw: s, star: s == "*" || s == "**", glob2: s == "**"}
+	if !g.star && strings.ContainsAny(s, "*?[\\") {
+		g.runes = []rune(s)
+	}
+	return g
+}
+
+// match tests one path segment. nameR is name as runes, converted by the
+// caller once per lookup (nil means convert on demand).
+func (g *seg) match(name string, nameR []rune) bool {
+	switch {
+	case g.star:
+		return true
+	case g.runes == nil:
+		return g.raw == name
+	}
+	if nameR == nil {
+		nameR = []rune(name)
+	}
+	return wildmatchRunes(g.runes, nameR)
 }
 
 // ignoreFile holds the patterns of one ignore file. base is the directory the
@@ -60,6 +99,11 @@ func (c *ignoreChain) push(f *ignoreFile) *ignoreChain {
 // ignored reports whether full (a slash path relative to the repository
 // root) is ignored.
 func (c *ignoreChain) ignored(full string, isDir bool) bool {
+	base := full
+	if i := strings.LastIndexByte(full, '/'); i >= 0 {
+		base = full[i+1:]
+	}
+	baseR := []rune(base) // converted once, not once per pattern
 	for n := c; n != nil; n = n.parent {
 		p, ok := relTo(n.file.base, full)
 		if !ok {
@@ -67,7 +111,7 @@ func (c *ignoreChain) ignored(full string, isDir bool) bool {
 		}
 		pats := n.file.pats
 		for i := len(pats) - 1; i >= 0; i-- {
-			if pats[i].match(p, isDir) {
+			if pats[i].match(p, base, baseR, isDir) {
 				return !pats[i].negate
 			}
 		}
@@ -85,61 +129,94 @@ func relTo(base, full string) (string, bool) {
 	return "", false
 }
 
-func (p *ignorePattern) match(rel string, isDir bool) bool {
+// match tests rel (relative to the ignore file's directory); base/baseR are
+// its last segment, precomputed by the caller.
+func (p *ignorePattern) match(rel, base string, baseR []rune, isDir bool) bool {
 	if p.dirOnly && !isDir {
 		return false
 	}
 	if !p.anchored {
-		name := rel
-		if i := strings.LastIndexByte(rel, '/'); i >= 0 {
-			name = rel[i+1:]
-		}
-		return wildmatch(p.segs[0], name)
+		return p.segs[0].match(base, baseR)
 	}
 	return matchSegments(p.segs, strings.Split(rel, "/"))
 }
 
 // matchSegments matches pattern segments against path segments, treating a
 // "**" segment as zero or more directories (one or more when trailing). It
-// uses dynamic programming so adversarial "**/**/**" patterns stay cheap.
-func matchSegments(pat, path []string) bool {
+// uses dynamic programming with two rolling rows (O(len(path)) memory), so
+// adversarial "**/**/**" patterns stay cheap.
+func matchSegments(pat []seg, path []string) bool {
 	m, n := len(pat), len(path)
-	w := n + 1
-	dp := make([]bool, (m+1)*w)
-	dp[m*w+n] = true
+	if m-countGlob2(pat) > n {
+		return false // more literal segments than path segments
+	}
+	next := make([]bool, n+1) // row i+1
+	cur := make([]bool, n+1)  // row i
+	next[n] = true            // empty pattern matches empty path
 	for i := m - 1; i >= 0; i-- {
 		for j := n; j >= 0; j-- {
 			var v bool
 			switch {
-			case pat[i] == "**" && i == m-1:
+			case pat[i].glob2 && i == m-1:
 				v = j < n
-			case pat[i] == "**":
-				v = dp[(i+1)*w+j] || (j < n && dp[i*w+j+1])
+			case pat[i].glob2:
+				v = next[j] || (j < n && cur[j+1])
 			default:
-				v = j < n && dp[(i+1)*w+j+1] && wildmatch(pat[i], path[j])
+				v = j < n && next[j+1] && pat[i].match(path[j], nil)
 			}
-			dp[i*w+j] = v
+			cur[j] = v
 		}
+		next, cur = cur, next
 	}
-	return dp[0]
+	return next[0]
 }
 
-// parseIgnore parses the contents of a gitignore-style file.
-func parseIgnore(base string, data []byte) *ignoreFile {
+func countGlob2(pat []seg) int {
+	c := 0
+	for i := range pat {
+		if pat[i].glob2 {
+			c++
+		}
+	}
+	return c
+}
+
+// parseIgnore parses the contents of a gitignore-style file. budget (may be
+// nil) is the number of patterns still allowed across the whole walk and is
+// decremented. truncated reports that patterns were dropped because a cap was
+// hit (per-file, per-walk, or an over-long pattern).
+func parseIgnore(base string, data []byte, budget *atomic.Int64) (f *ignoreFile, truncated bool) {
 	data = bytes.TrimPrefix(data, []byte("\xef\xbb\xbf"))
-	f := &ignoreFile{base: base}
+	f = &ignoreFile{base: base}
 	for len(data) > 0 {
+		if len(f.pats) >= maxPatternsPerFile {
+			return f, true
+		}
 		var line []byte
 		if i := bytes.IndexByte(data, '\n'); i >= 0 {
 			line, data = data[:i], data[i+1:]
 		} else {
 			line, data = data, nil
 		}
-		if p, ok := parsePattern(string(bytes.TrimSuffix(line, []byte("\r")))); ok {
-			f.pats = append(f.pats, p)
+		line = bytes.TrimSuffix(line, []byte("\r"))
+		if utf8.RuneCount(line) > maxPatternRunes {
+			truncated = true
+			continue
 		}
+		p, ok := parsePattern(string(line))
+		if !ok {
+			continue
+		}
+		if len(p.segs) > maxSegmentsPerPattern {
+			truncated = true
+			continue
+		}
+		if budget != nil && budget.Add(-1) < 0 {
+			return f, true
+		}
+		f.pats = append(f.pats, p)
 	}
-	return f
+	return f, truncated
 }
 
 func parsePattern(line string) (ignorePattern, bool) {
@@ -161,15 +238,18 @@ func parsePattern(line string) (ignorePattern, bool) {
 	}
 	p.anchored = strings.Contains(line, "/")
 	line = strings.TrimLeft(line, "/")
-	var segs []string
+	var segs []seg
 	for s := range strings.SplitSeq(line, "/") {
 		if s == "" {
 			continue
 		}
-		if s == "**" && len(segs) > 0 && segs[len(segs)-1] == "**" {
+		if s == "**" && len(segs) > 0 && segs[len(segs)-1].glob2 {
 			continue
 		}
-		segs = append(segs, s)
+		segs = append(segs, newSeg(s))
+		if len(segs) > maxSegmentsPerPattern {
+			break // rejected by the caller; stop allocating
+		}
 	}
 	if len(segs) == 0 {
 		return p, false
@@ -204,14 +284,12 @@ func trimTrailingSpaces(s string) string {
 // never match '/', which cannot occur in a segment anyway. A malformed
 // bracket expression makes the pattern match nothing, like git.
 func wildmatch(pattern, name string) bool {
-	if pattern == "*" || pattern == "**" {
-		return true
-	}
-	if !strings.ContainsAny(pattern, "*?[\\") {
-		return pattern == name
-	}
-	p := []rune(pattern)
-	n := []rune(name)
+	g := newSeg(pattern)
+	return g.match(name, nil)
+}
+
+// wildmatchRunes is wildmatch with pattern and name already converted.
+func wildmatchRunes(p, n []rune) bool {
 	px, nx := 0, 0
 	starPx, starNx := -1, -1
 	for px < len(p) || nx < len(n) {

@@ -55,7 +55,7 @@
   ],
   "C++ sample.cpp": [
     {
-      "kind": "method",
+      "kind": "function",
       "name": "app.first",
       "start": 5,
       "end": 8
@@ -82,7 +82,7 @@
     },
     {
       "kind": "function",
-      "name": "Get",
+      "name": "Store.Get",
       "start": 14,
       "end": 16
     },
@@ -267,7 +267,7 @@
     {
       "kind": "function",
       "name": "run",
-      "start": 7,
+      "start": 5,
       "end": 9
     },
     {

@@ -295,3 +295,51 @@ func BenchmarkExtractRepo(b *testing.B) {
 		})
 	}
 }
+
+// Regression: a timed-out parse must not poison the pooled parser (the next
+// parse on it aborted the process), and deeply unbalanced input must not
+// reach tree-sitter's superlinear error recovery.
+func TestTimeoutThenReuse(t *testing.T) {
+	ctx := context.Background()
+	bad := []byte(strings.Repeat("f<A<", 512<<10))
+	if _, err := Extract(ctx, "a.ts", "TypeScript", bad, Options{ParseTimeout: 50 * time.Millisecond}); err != nil && err != ErrParseTimeout {
+		t.Fatal(err)
+	}
+	next := []byte(strings.Repeat("`${", 699050))
+	if _, err := Extract(ctx, "b.ts", "TypeScript", next, Options{ParseTimeout: 50 * time.Millisecond}); err != nil && err != ErrParseTimeout {
+		t.Fatal(err)
+	}
+	// Balanced but slow input reaches the parser and times out; then reuse.
+	for i := 0; i < 8; i++ {
+		slow := []byte(strings.Repeat("let a = b + c * d - e / f % g ? h : i;\n", 60000))
+		if _, err := Extract(ctx, "s.ts", "TypeScript", slow, Options{ParseTimeout: time.Millisecond}); err != ErrParseTimeout {
+			t.Fatalf("expected a timeout to exercise the reuse path, got %v", err)
+		}
+	}
+	// And a normal file still parses afterwards.
+	units, err := Extract(ctx, "c.ts", "TypeScript", []byte("function ok() { return 1 }\n"), Options{})
+	if err != nil || len(units) == 0 {
+		t.Fatalf("parser pool broken after timeouts: %v %v", units, err)
+	}
+}
+
+func TestPathologicalFallsBack(t *testing.T) {
+	for _, lang := range []string{"Java", "C#", "TypeScript"} {
+		src := []byte(strings.Repeat("A<", 64<<10))
+		start := time.Now()
+		units, err := Extract(context.Background(), "x", lang, src, Options{})
+		if err != nil || len(units) != 1 || units[0].Kind != core.KindFile {
+			t.Fatalf("%s: %v %v", lang, units, err)
+		}
+		if d := time.Since(start); d > 200*time.Millisecond {
+			t.Fatalf("%s: took %v", lang, d)
+		}
+	}
+}
+
+func TestCleanStripsControls(t *testing.T) {
+	got := clean("A.['\x1b[31mhi\x00\u0085\u202e\u200bx\tz']")
+	if got != "A.['[31mhixz']" {
+		t.Fatalf("clean: %q", got)
+	}
+}

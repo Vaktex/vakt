@@ -328,3 +328,103 @@ func benchWalk(b *testing.B, root string) {
 
 func BenchmarkWalkLlamaCpp(b *testing.B)  { benchWalk(b, "/Users/shearer/vaktex/llama.cpp") }
 func BenchmarkWalkJuiceShop(b *testing.B) { benchWalk(b, "/Users/shearer/vaktex/juice-shop") }
+
+func TestFileDataDelivered(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, root, "a.go", []byte("package a\n"))
+	r := collect(t, context.Background(), root, Options{})
+	if string(r.files["a.go"].Data) != "package a\n" {
+		t.Fatalf("data %q", r.files["a.go"].Data)
+	}
+}
+
+// The scanned tree must not be able to hide files silently.
+func TestRepoIgnoresReportedAndOptional(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, root, ".gitignore", []byte("backdoor.py\nsecret/\n"))
+	writeFile(t, root, ".vaktignore", []byte("*.js\n"))
+	writeFile(t, root, "backdoor.py", []byte("import os\n"))
+	writeFile(t, root, "secret/x.py", []byte("import os\n"))
+	writeFile(t, root, "app.js", []byte("x()\n"))
+	r := collect(t, context.Background(), root, Options{})
+	for _, rel := range []string{"backdoor.py", "secret", "app.js"} {
+		if r.skips[rel] != ReasonIgnored {
+			t.Errorf("%s: skip %q, want %q", rel, r.skips[rel], ReasonIgnored)
+		}
+	}
+	r = collect(t, context.Background(), root, Options{NoRepoIgnores: true})
+	for _, rel := range []string{"backdoor.py", "secret/x.py", "app.js"} {
+		if _, ok := r.files[rel]; !ok {
+			t.Errorf("NoRepoIgnores: %s not scanned", rel)
+		}
+	}
+}
+
+// A .git symlink must not redirect info/exclude to another tree.
+func TestGitSymlinkExcludeIgnored(t *testing.T) {
+	outside := t.TempDir()
+	writeFile(t, outside, "info/exclude", []byte("*.py\n"))
+	root := t.TempDir()
+	writeFile(t, root, "a.py", []byte("x = 1\n"))
+	if err := os.Symlink(outside, filepath.Join(root, ".git")); err != nil {
+		t.Fatal(err)
+	}
+	r := collect(t, context.Background(), root, Options{})
+	if _, ok := r.files["a.py"]; !ok {
+		t.Fatalf("a.py hidden by an outside exclude file: %v", r.skips)
+	}
+}
+
+// Swapping a directory or file for a symlink to outside the root while the
+// walk runs must never deliver outside content.
+func TestSwapRaceCannotEscape(t *testing.T) {
+	if testing.Short() {
+		t.Skip("race loop")
+	}
+	outside := t.TempDir()
+	writeFile(t, outside, "SECRET.py", []byte("TOPSECRET\n"))
+	writeFile(t, outside, "f.py", []byte("TOPSECRET\n"))
+	root := t.TempDir()
+	for i := 0; i < 50; i++ {
+		writeFile(t, root, filepath.Join("d", strings.Repeat("x", i%7+1)+string(rune('a'+i%26))+".py"), []byte("ok = 1\n"))
+	}
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Go(func() {
+		dir, link := filepath.Join(root, "zz"), filepath.Join(root, "zz.tmp")
+		file, flink := filepath.Join(root, "f.py"), filepath.Join(root, "f.tmp")
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			_ = os.MkdirAll(dir, 0o750)
+			_ = os.WriteFile(filepath.Join(dir, "SECRET.py"), []byte("ok = 1\n"), 0o600)
+			_ = os.WriteFile(file, []byte("ok = 1\n"), 0o600)
+			runtime.Gosched()
+			_ = os.Symlink(outside, link)
+			_ = os.RemoveAll(dir)
+			_ = os.Rename(link, dir)
+			_ = os.Symlink(filepath.Join(outside, "f.py"), flink)
+			_ = os.Rename(flink, file)
+			runtime.Gosched()
+			_ = os.Remove(dir)
+		}
+	})
+	deadline := time.Now().Add(3 * time.Second)
+	for iter := 0; time.Now().Before(deadline); iter++ {
+		for _, follow := range []bool{false, true} {
+			r := collect(t, context.Background(), root, Options{FollowSymlinks: follow})
+			for rel, f := range r.files {
+				if strings.Contains(string(f.Data), "TOPSECRET") {
+					close(stop)
+					wg.Wait()
+					t.Fatalf("iteration %d follow=%v: %s delivered outside content", iter, follow, rel)
+				}
+			}
+		}
+	}
+	close(stop)
+	wg.Wait()
+}
