@@ -106,6 +106,28 @@ func TestBuildSortingAndGrouping(t *testing.T) {
 	}
 }
 
+func TestFilter(t *testing.T) {
+	meta, res := fixture()
+	r := Build(meta, res, 0.5)
+	f := Filter(r, 0.8, []string{"memory_safety"})
+	if len(f.Units) != 2 || f.Summary.FlaggedUnits != 2 || f.Summary.FlaggedFiles != 2 || f.Summary.Threshold != 0.8 {
+		t.Fatalf("filtered = %+v", f.Summary)
+	}
+	if len(r.Units) != 6 || r.Summary.Threshold != 0.5 {
+		t.Error("Filter mutated its input")
+	}
+	g := Filter(r, 0.9, nil)
+	if g.Summary.FlaggedUnits != 1 || len(g.Units) != 6 {
+		t.Errorf("threshold only: %+v", g.Summary)
+	}
+	if MaxSeverity(r) != 0.93 {
+		t.Errorf("MaxSeverity = %v", MaxSeverity(r))
+	}
+	if ValidateFamilies([]string{"memory_safety"}) != nil || ValidateFamilies([]string{"nope"}) == nil {
+		t.Error("ValidateFamilies")
+	}
+}
+
 func TestBuildEmpty(t *testing.T) {
 	r := Build(Meta{}, nil, 0.5)
 	var b bytes.Buffer
@@ -281,21 +303,21 @@ func TestPrettySanitizesHostileStrings(t *testing.T) {
 
 func TestSanitize(t *testing.T) {
 	cases := map[string]string{
-		"plain/path.go":                "plain/path.go",
-		"a\x1b[1;31mb\x1b[0m":          "ab",
-		"a\x1b]8;;http://x\x1b\\b":     "ab",
-		"a\x1b]0;title\x07b":           "ab",
-		"a\x1bPdcs\x1b\\b":             "ab",
-		"a\u009b31mb":                  "ab",
-		"a\u009dosc\u009cb":            "ab",
+		"plain/path.go":                 "plain/path.go",
+		"a\x1b[1;31mb\x1b[0m":           "ab",
+		"a\x1b]8;;http://x\x1b\\b":      "ab",
+		"a\x1b]0;title\x07b":            "ab",
+		"a\x1bPdcs\x1b\\b":              "ab",
+		"a\u009b31mb":                   "ab",
+		"a\u009dosc\u009cb":             "ab",
 		"a\u202Eb\u2066c\u2069d\u202Ae": "abcde",
-		"zero\u200Bwidth\uFEFF\u2060":  "zerowidth",
-		"tab\tnew\nline":               "tab new line",
-		"bell\x07del\x7f":              "belldel",
-		"bad\xffutf8":                  "bad\uFFFDutf8",
-		"日本語/ファイル.py":                  "日本語/ファイル.py",
-		"trailing\x1b":                 "trailing",
-		"trailing\x1b[":                "trailing",
+		"zero\u200Bwidth\uFEFF\u2060":   "zerowidth",
+		"tab\tnew\nline":                "tab new line",
+		"bell\x07del\x7f":               "belldel",
+		"bad\xffutf8":                   "bad\uFFFDutf8",
+		"日本語/ファイル.py":                   "日本語/ファイル.py",
+		"trailing\x1b":                  "trailing",
+		"trailing\x1b[":                 "trailing",
 	}
 	for in, want := range cases {
 		if got := sanitize(in); got != want {

@@ -187,11 +187,12 @@ func topTable(p *palette, r *Report, v *view, o PrettyOptions) string {
 	b.WriteString(p.title.Render(title) + "\n")
 
 	rows := v.flagged[:n]
-	famW := len("FAMILY")
-	langW := len("LANG")
+	famW, langW, locNat, nameNat := len("FAMILY"), len("LANG"), len("LOCATION"), len("UNIT")
 	for _, u := range rows {
 		famW = max(famW, len(u.TopFamily)+5)
 		langW = max(langW, ansi.StringWidth(sanitize(u.Language)))
+		locNat = max(locNat, ansi.StringWidth(location(u)))
+		nameNat = max(nameNat, ansi.StringWidth(unitName(u)))
 	}
 	langW = min(langW, 12)
 	const sevW = barWidth + 5 // bar + space + 0.00
@@ -200,8 +201,22 @@ func topTable(p *palette, r *Report, v *view, o PrettyOptions) string {
 	if !showLang {
 		rest += langW + 2
 	}
-	locW := max(10, rest*3/5)
-	nameW := max(6, rest-locW)
+	// Give each column its natural width when it fits; otherwise the
+	// location gets 60% of what is left (it is truncated from the left, so
+	// the file name and lines survive) and the unit name the rest.
+	locW, nameW := locNat, nameNat
+	if locW+nameW > rest {
+		switch {
+		case nameNat <= rest*2/5:
+			locW = rest - nameNat
+		case locNat <= rest*3/5:
+			nameW = rest - locNat
+		default:
+			locW = rest * 3 / 5
+			nameW = rest - locW
+		}
+	}
+	locW, nameW = max(10, locW), max(6, nameW)
 
 	hdr := "  " + pad("SEVERITY", sevW) + "  " + pad("FAMILY", famW) + "  " + pad("LOCATION", locW) + "  " + pad("UNIT", nameW)
 	if showLang {
@@ -233,7 +248,7 @@ func histogram(p *palette, v *view, o PrettyOptions) string {
 			nameW = max(nameW, len(labels.Families[i]))
 		}
 	}
-	width := min(40, o.Width-nameW-12)
+	width := max(4, min(30, o.Width-nameW-12))
 	type row struct{ i, c int }
 	var rows []row
 	for i, c := range v.byFamily {
