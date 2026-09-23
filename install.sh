@@ -471,6 +471,36 @@ keyring_sha256() {
 	esac
 }
 
+# ensure_blas: the Linux builds link OpenBLAS/LAPACK dynamically (MLX's CPU
+# kernels). Offer to install them with the distro package manager.
+ensure_blas() {
+	cache=$(ldconfig -p 2>/dev/null || true)
+	missing=""
+	for lib in libopenblas.so.0 liblapack.so.3; do
+		case $cache in *"$lib "*|*"$lib") continue ;; esac
+		missing="$missing $lib"
+	done
+	[ -z "$missing" ] && { ok "OpenBLAS/LAPACK runtime present"; return 0; }
+	warn "missing runtime libraries:$missing"
+	id=""
+	[ -r "$VAKT_OS_RELEASE" ] && id=$(os_release_field ID)
+	case $id in
+	ubuntu|debian) cmd="apt-get install -y libopenblas0 liblapack3" ;;
+	rhel|rocky|almalinux|centos|fedora) cmd="dnf install -y openblas lapack" ;;
+	*)
+		warn "install OpenBLAS and LAPACK with your package manager, then re-run"
+		return 0
+		;;
+	esac
+	say "  Install them with:  sudo $cmd"
+	if [ "$opt_no_deps" = 1 ]; then return 0; fi
+	ask "Install OpenBLAS/LAPACK now with sudo?" || return 0
+	setup_sudo || return 0
+	case $id in ubuntu|debian) run $sudo_cmd apt-get update || true ;; esac
+	# shellcheck disable=SC2086 # cmd is a fixed command line chosen above
+	run $sudo_cmd $cmd || warn "package install failed; vakt will not start until OpenBLAS/LAPACK are installed"
+}
+
 os_release_field() {
 	# Parse KEY=value / KEY="value" without sourcing the file.
 	sed -n "s/^$1=//p" "$VAKT_OS_RELEASE" | head -n 1 | tr -d '"'"'"
@@ -662,6 +692,7 @@ main() {
 	trap 'cleanup; exit 143' TERM
 
 	detect_platform
+	if [ "$os" = linux ]; then ensure_blas; fi
 	resolve_version
 	info "release: $VAKT_REPO $VAKT_VERSION, asset: $asset"
 	download_and_verify

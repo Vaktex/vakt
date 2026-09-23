@@ -71,6 +71,15 @@ Linux)
 	else
 		bad "binary needs glibc $need > supported $max_glibc (build on an older base image)"
 	fi
+	# Every dynamic dependency must be something install.sh checks for or
+	# installs (glibc, OpenBLAS/LAPACK, the CUDA 13 runtime) or ships with it.
+	unexpected=$(readelf -d "$bin" 2>/dev/null | sed -n 's/.*(NEEDED).*\[\(.*\)\]/\1/p' | grep -vE \
+		'^(libc|libm|libdl|librt|libpthread|libstdc\+\+|libgcc_s|ld-linux[-a-z0-9_]*)\.so|^lib(openblas|lapack|lapacke|gfortran|quadmath)\.so|^lib(cublas|cublasLt|nvrtc|cudnn|cuda|nccl)\.so' || true)
+	if [ -n "$unexpected" ]; then
+		bad "unexpected shared library dependencies: $(printf '%s' "$unexpected" | tr '\n' ' ')"
+	else
+		pass "shared library dependencies are all provisioned by install.sh"
+	fi
 	;;
 *)
 	bad "unsupported audit host: $(uname -s)"
