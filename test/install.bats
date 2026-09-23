@@ -62,7 +62,8 @@ setup() {
 	os_release ubuntu 24.04
 	publish vakt-linux-amd64-cuda13
 	cp "$ASSETS/vakt-bin" "$ASSETS/cuda-keyring_1.1-1_all.deb"
-	run_installer --version v1.0.0 --yes
+	VAKT_TEST_KEYRING_SHA256=$(shasum -a 256 "$ASSETS/cuda-keyring_1.1-1_all.deb" | cut -d' ' -f1) \
+		run_installer --version v1.0.0 --yes
 	[ "$status" -eq 0 ]
 	grep -q '^sudo dpkg -i' "$CALLS"
 	grep -q '^sudo apt-get install -y cuda-libraries-13-0 libcudnn9-cuda-13' "$CALLS"
@@ -189,6 +190,64 @@ setup() {
 	run_installer --version '../../evil'
 	[ "$status" -ne 0 ]
 	[[ "$output" == *"invalid version"* ]]
+}
+
+@test "--version cannot traverse to another repo path" {
+	setup_stubs
+	run_installer --version 'v1/../../../../evil/repo/releases/download/v1'
+	[ "$status" -ne 0 ]
+	[[ "$output" == *"invalid version"* ]]
+	! grep -q '^curl' "$CALLS"
+}
+
+@test "VAKT_REPO with extra path segments is rejected" {
+	setup_stubs
+	VAKT_REPO=a/b/c run_installer --version v1.0.0
+	[ "$status" -ne 0 ]
+	[[ "$output" == *"invalid VAKT_REPO"* ]]
+}
+
+@test "--prefix with shell metacharacters is rejected before touching rc files" {
+	setup_stubs
+	publish vakt-linux-amd64-cpu
+	for bad in '/tmp/q"; touch /tmp/pwned_vakt; echo "' '/tmp/r$(touch /tmp/pwned_vakt2)' "/tmp/s'x" '/tmp/f; touch /tmp/p' 'relative/dir'; do
+		PATH="$STUBS:/usr/bin:/bin:/usr/sbin:/sbin" HOME="$BATS_TEST_TMPDIR/home" NO_COLOR=1 SHELL=/bin/zsh \
+			run sh "$INSTALL_SH" --prefix "$bad" --version v1.0.0 --modify-path --no-summon </dev/null
+		[ "$status" -ne 0 ]
+		[[ "$output" == *"--prefix"* ]]
+	done
+	[ ! -e "$BATS_TEST_TMPDIR/home/.zshrc" ]
+	[ ! -e /tmp/pwned_vakt ] && [ ! -e /tmp/pwned_vakt2 ]
+}
+
+@test "--modify-path appends a safe line to the zsh rc file" {
+	setup_stubs
+	publish vakt-linux-amd64-cpu
+	SHELL=/bin/zsh run_installer --version v1.0.0 --modify-path
+	[ "$status" -eq 0 ]
+	grep -qx "export PATH=\"$PREFIX/bin:\$PATH\"" "$BATS_TEST_TMPDIR/home/.zshrc"
+}
+
+@test "duplicate SHA256SUMS entries are refused" {
+	setup_stubs
+	publish vakt-linux-amd64-cpu
+	(cd "$ASSETS" && shasum -a 256 vakt-linux-amd64-cpu >>SHA256SUMS)
+	run_installer --version v1.0.0
+	[ "$status" -ne 0 ]
+	[[ "$output" == *"more than one entry"* ]]
+}
+
+@test "cuda-keyring with a wrong checksum is not installed" {
+	export STUB_NVIDIA="580.65.06, NVIDIA L4"
+	setup_stubs
+	os_release ubuntu 22.04
+	publish vakt-linux-amd64-cpu
+	echo "not the real keyring" >"$ASSETS/cuda-keyring_1.1-1_all.deb"
+	run_installer --version v1.0.0 --yes
+	[ "$status" -eq 0 ]
+	[[ "$output" == *"cuda-keyring checksum mismatch"* ]]
+	! grep -q '^sudo dpkg' "$CALLS"
+	[[ "$output" == *"asset: vakt-linux-amd64-cpu"* ]]
 }
 
 # ---------------------------------------------------------------- modes

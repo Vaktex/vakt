@@ -188,12 +188,9 @@ parse_args() {
 		shift
 	done
 
-	case $VAKT_VERSION in
-	latest|v[0-9]*) ;;
-	*) die "invalid version '$VAKT_VERSION' (expected latest or vX.Y.Z)" ;;
-	esac
+	validate_version "$VAKT_VERSION"
 	case $VAKT_REPO in
-	*[!A-Za-z0-9._/-]*|*..*|/*|*/) die "invalid VAKT_REPO '$VAKT_REPO'" ;;
+	*/*/*|*[!A-Za-z0-9._/-]*|*..*|/*|*/|.*|-*|*/.*|*/-*) die "invalid VAKT_REPO '$VAKT_REPO' (expected owner/repo)" ;;
 	*/*) ;;
 	*) die "invalid VAKT_REPO '$VAKT_REPO' (expected owner/repo)" ;;
 	esac
@@ -203,7 +200,29 @@ parse_args() {
 	elif [ -z "$opt_prefix" ]; then
 		opt_prefix=${HOME:?HOME is not set}/.local
 	fi
-	bin_dir=$opt_prefix/bin
+	# The prefix ends up in PATH advice and, with --modify-path, in a shell rc
+	# file, so it must be a plain absolute path: no quotes, $, backticks, ;.
+	case $opt_prefix in
+	/*) ;;
+	*) die "--prefix must be an absolute path" ;;
+	esac
+	case $opt_prefix in
+	*[!A-Za-z0-9._/+@-]*) die "--prefix may only contain letters, digits and ._/+@- (got '$opt_prefix')" ;;
+	esac
+	bin_dir=${opt_prefix%/}/bin
+}
+
+# validate_version: "latest" or a tag made of safe characters only. The tag is
+# placed in a URL path, so '/' and '..' must never get through.
+validate_version() {
+	case $1 in
+	latest) return 0 ;;
+	v[0-9]*) ;;
+	*) die "invalid version '$1' (expected latest or vX.Y.Z)" ;;
+	esac
+	case $1 in
+	*[!A-Za-z0-9.+-]*|*..*) die "invalid version '$1' (expected latest or vX.Y.Z)" ;;
+	esac
 }
 
 # ---------------------------------------------------------------- detection
@@ -369,6 +388,14 @@ install_cuda_runtime() {
 		esac
 		;;
 	esac
+	# distro goes into a URL path: only letters followed by a numeric version.
+	case $distro in
+	ubuntu[0-9]*|debian[0-9]*|rhel[0-9]*|fedora[0-9]*) ;;
+	*) warn "unrecognised distribution version; install the CUDA 13 runtime manually"; return 1 ;;
+	esac
+	case $distro in
+	*[!a-z0-9]*) warn "unrecognised distribution version; install the CUDA 13 runtime manually"; return 1 ;;
+	esac
 
 	say ""
 	say "  The CUDA 13 runtime can be installed from NVIDIA's repository with:"
@@ -387,11 +414,22 @@ install_cuda_runtime() {
 	setup_sudo || return 1
 
 	if [ "$family" = apt ]; then
-		keyring=${workdir:-/tmp}/cuda-keyring_1.1-1_all.deb
+		[ -n "$workdir" ] || die "internal error: work directory not set"
+		keyring=$workdir/cuda-keyring_1.1-1_all.deb
+		want=$(keyring_sha256 "$distro" "$repo_arch")
+		if [ -z "$want" ]; then
+			warn "no pinned checksum for the $distro/$repo_arch cuda-keyring; run the commands above manually"
+			return 1
+		fi
 		if [ "$opt_dry_run" = 1 ]; then
-			printf '+ fetch %s\n' "$base/$distro/$repo_arch/cuda-keyring_1.1-1_all.deb"
+			printf '+ fetch %s (sha256 %s)\n' "$base/$distro/$repo_arch/cuda-keyring_1.1-1_all.deb" "$want"
 		else
 			fetch "$base/$distro/$repo_arch/cuda-keyring_1.1-1_all.deb" "$keyring" || return 1
+			got=$(sha256_of "$keyring")
+			if [ "$got" != "$want" ]; then
+				warn "cuda-keyring checksum mismatch (expected $want, got $got); not installing it"
+				return 1
+			fi
 		fi
 		# shellcheck disable=SC2086 # sudo_cmd is intentionally empty or a single word
 		run $sudo_cmd dpkg -i "$keyring" || return 1
@@ -406,6 +444,23 @@ install_cuda_runtime() {
 		run $sudo_cmd dnf install -y $pkgs || return 1
 	fi
 	return 0
+}
+
+# keyring_sha256 <distro> <arch>: pinned sha256 of NVIDIA's cuda-keyring
+# 1.1-1 package, which installs as root and adds an apt signing key.
+keyring_sha256() {
+	# Test hook only: lets the bats suite exercise the install path with a
+	# stub package. Whoever sets it already controls this shell.
+	if [ -n "${VAKT_TEST_KEYRING_SHA256:-}" ]; then echo "$VAKT_TEST_KEYRING_SHA256"; return 0; fi
+	case $1/$2 in
+	ubuntu2204/x86_64) echo d93190d50b98ad4699ff40f4f7af50f16a76dac3bb8da1eaaf366d47898ff8df ;;
+	ubuntu2204/sbsa) echo 36d1aed84dfcf93ee9a0212d149f1c4187db92e03ab96a759ec0689aa438fd9e ;;
+	ubuntu2404/x86_64) echo d2a6b11c096396d868758b86dab1823b25e14d70333f1dfa74da5ddaf6a06dba ;;
+	ubuntu2404/sbsa) echo 6ea7d2737648936820e85677177957a0f6521b840d98eb0bbae0a4f003fa7249 ;;
+	debian12/x86_64) echo e7f219eab6fe4819cdb5c15b98233dc3420302d9c00883219cd3d896857cf48d ;;
+	debian12/sbsa) echo bf2f53b1a19259501119f732bdef2699f8c80c69a18e6a78dad78d67d96766dc ;;
+	*) echo "" ;;
+	esac
 }
 
 os_release_field() {
@@ -429,7 +484,7 @@ resolve_version() {
 		"https://github.com/$VAKT_REPO/releases/latest" 2>/dev/null) || url=""
 	tag=${url##*/}
 	case $tag in
-	v[0-9]*) VAKT_VERSION=$tag ;;
+	v[0-9]*) validate_version "$tag"; VAKT_VERSION=$tag ;;
 	*) die "could not resolve the latest release of $VAKT_REPO; pass --version vX.Y.Z" ;;
 	esac
 }
@@ -452,7 +507,9 @@ download_and_verify() {
 		fetch "$base/$asset" "$workdir/$asset" || die "could not download $asset for $VAKT_VERSION"
 	fi
 
-	expected=$(awk -v f="$asset" '$2 == f || $2 == "*" f {print $1}' "$workdir/SHA256SUMS" | head -n 1)
+	entries=$(awk -v f="$asset" '$2 == f || $2 == "*" f {print $1}' "$workdir/SHA256SUMS")
+	[ "$(printf '%s\n' "$entries" | grep -c .)" -le 1 ] || die "SHA256SUMS has more than one entry for $asset; refusing to install"
+	expected=$entries
 	case $expected in
 	'') die "SHA256SUMS has no entry for $asset; refusing to install" ;;
 	*[!0-9a-f]*) die "malformed checksum for $asset in SHA256SUMS; refusing to install" ;;
@@ -471,15 +528,21 @@ install_binary() {
 		ask "Install to $bin_dir with sudo?" || die "not installing to $bin_dir without permission"
 		setup_sudo || exit 1
 	fi
-	# shellcheck disable=SC2086
-	run $sudo_cmd mkdir -p "$bin_dir"
-	tmp_target=$bin_dir/.vakt.tmp.$$
-	# shellcheck disable=SC2086
-	run $sudo_cmd cp "$workdir/$asset" "$tmp_target"
-	# shellcheck disable=SC2086
-	run $sudo_cmd chmod 0755 "$tmp_target"
-	# shellcheck disable=SC2086
-	run $sudo_cmd mv -f "$tmp_target" "$target"
+	if [ "$opt_dry_run" = 1 ]; then
+		printf '+ install -m 0755 <verified %s> %s\n' "$asset" "$target"
+	else
+		# shellcheck disable=SC2086
+		$sudo_cmd mkdir -p "$bin_dir"
+		# Unpredictable temp name in the target dir, then an atomic rename.
+		# shellcheck disable=SC2086
+		tmp_target=$($sudo_cmd mktemp "$bin_dir/.vakt.XXXXXX")
+		# shellcheck disable=SC2086
+		$sudo_cmd cp "$workdir/$asset" "$tmp_target"
+		# shellcheck disable=SC2086
+		$sudo_cmd chmod 0755 "$tmp_target"
+		# shellcheck disable=SC2086
+		$sudo_cmd mv -f "$tmp_target" "$target"
+	fi
 	if [ "$os" = darwin ]; then
 		# shellcheck disable=SC2086
 		run $sudo_cmd xattr -d com.apple.quarantine "$target" 2>/dev/null || true
@@ -492,6 +555,9 @@ install_binary() {
 
 path_advice() {
 	case ":${PATH:-}:" in *":$bin_dir:"*) return 0 ;; esac
+	# Defence in depth: bin_dir is validated in parse_args, but it is about
+	# to be written into a file the user's shell executes.
+	case $bin_dir in *[!A-Za-z0-9._/+@-]*) die "refusing to write an unsafe PATH entry" ;; esac
 	shell_name=$(basename "${SHELL:-sh}")
 	case $shell_name in
 	zsh) rc=$HOME/.zshrc; line="export PATH=\"$bin_dir:\$PATH\"" ;;
@@ -550,7 +616,10 @@ post_install() {
 uninstall() {
 	target=$bin_dir/vakt
 	if [ -e "$target" ]; then
-		if [ ! -w "$bin_dir" ] && [ "$opt_dry_run" = 0 ]; then setup_sudo || exit 1; fi
+		if [ ! -w "$bin_dir" ] && [ "$opt_dry_run" = 0 ]; then
+			ask "Remove $target with sudo?" || die "not removing $target without permission"
+			setup_sudo || exit 1
+		fi
 		# shellcheck disable=SC2086
 		run $sudo_cmd rm -f "$target"
 		ok "removed $target"
@@ -580,7 +649,8 @@ main() {
 	fi
 	workdir=$(mktemp -d "${TMPDIR:-/tmp}/vakt-install.XXXXXX")
 	trap cleanup EXIT
-	trap 'cleanup; exit 130' INT TERM
+	trap 'cleanup; exit 130' INT
+	trap 'cleanup; exit 143' TERM
 
 	detect_platform
 	resolve_version
