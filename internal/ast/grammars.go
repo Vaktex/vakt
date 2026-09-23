@@ -10,8 +10,8 @@ import (
 	tskotlin "github.com/tree-sitter-grammars/tree-sitter-kotlin/bindings/go"
 	tslua "github.com/tree-sitter-grammars/tree-sitter-lua/bindings/go"
 	tsbash "github.com/tree-sitter/tree-sitter-bash/bindings/go"
-	tsc "github.com/tree-sitter/tree-sitter-c/bindings/go"
 	tscsharp "github.com/tree-sitter/tree-sitter-c-sharp/bindings/go"
+	tsc "github.com/tree-sitter/tree-sitter-c/bindings/go"
 	tscpp "github.com/tree-sitter/tree-sitter-cpp/bindings/go"
 	tsgo "github.com/tree-sitter/tree-sitter-go/bindings/go"
 	tsjava "github.com/tree-sitter/tree-sitter-java/bindings/go"
@@ -66,15 +66,15 @@ var specs = map[string]*spec{
 	"C++": {lang: tscpp.Language, funcs: []string{"function_definition"}, classes: []string{"class_specifier", "struct_specifier", "namespace_definition"},
 		wrappers: []string{"template_declaration"}, comments: []string{"comment"}},
 	"C#": {lang: tscsharp.Language, funcs: []string{"method_declaration", "constructor_declaration", "local_function_statement", "operator_declaration"},
-		classes: []string{"class_declaration", "struct_declaration", "interface_declaration", "record_declaration", "namespace_declaration", "file_scoped_namespace_declaration"},
+		classes:  []string{"class_declaration", "struct_declaration", "interface_declaration", "record_declaration", "namespace_declaration", "file_scoped_namespace_declaration"},
 		comments: []string{"comment"}},
 	"PHP": {lang: tsphp.LanguagePHP, funcs: []string{"function_definition", "method_declaration"},
 		classes: []string{"class_declaration", "trait_declaration", "interface_declaration"}, comments: []string{"comment"}},
-	"Ruby": {lang: tsruby.Language, funcs: []string{"method", "singleton_method"}, classes: []string{"class", "module"}, comments: []string{"comment"}},
-	"Bash": {lang: tsbash.Language, funcs: []string{"function_definition"}, comments: []string{"comment"}},
+	"Ruby":   {lang: tsruby.Language, funcs: []string{"method", "singleton_method"}, classes: []string{"class", "module"}, comments: []string{"comment"}},
+	"Bash":   {lang: tsbash.Language, funcs: []string{"function_definition"}, comments: []string{"comment"}},
 	"Kotlin": {lang: tskotlin.Language, funcs: []string{"function_declaration"}, classes: []string{"class_declaration", "object_declaration"}, comments: []string{"line_comment", "block_comment"}},
-	"Scala": {lang: tsscala.Language, funcs: []string{"function_definition"}, classes: []string{"class_definition", "object_definition", "trait_definition"}, comments: []string{"comment", "block_comment"}},
-	"Lua": {lang: tslua.Language, funcs: []string{"function_declaration"}, comments: []string{"comment"}},
+	"Scala":  {lang: tsscala.Language, funcs: []string{"function_definition"}, classes: []string{"class_definition", "object_definition", "trait_definition"}, comments: []string{"comment", "block_comment"}},
+	"Lua":    {lang: tslua.Language, funcs: []string{"function_declaration"}, comments: []string{"comment"}},
 	"Solidity": {lang: tssol.Language, funcs: []string{"function_definition", "modifier_definition", "constructor_definition", "fallback_receive_definition"},
 		classes: []string{"contract_declaration", "library_declaration", "interface_declaration"}, comments: []string{"comment"}},
 	"Terraform": {lang: tshcl.Language, funcs: []string{"block"}, comments: []string{"comment"}},

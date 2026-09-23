@@ -160,7 +160,7 @@ func TestWalkSymlinks(t *testing.T) {
 	}
 	mustLink(filepath.Join(outside, "secret.go"), "escape.go")
 	mustLink(outside, "escapedir")
-	mustLink("real", "alias")                     // dir inside root
+	mustLink("real", "alias")                       // dir inside root
 	mustLink(filepath.Join("real", "a.go"), "b.go") // file inside root
 	mustLink(".", "loop")                           // loop to root
 	mustLink("missing", "broken.go")
@@ -326,5 +326,5 @@ func benchWalk(b *testing.B, root string) {
 	b.ReportMetric(float64(files)*float64(b.N)/b.Elapsed().Seconds(), "files/s")
 }
 
-func BenchmarkWalkLlamaCpp(b *testing.B) { benchWalk(b, "/Users/shearer/vaktex/llama.cpp") }
+func BenchmarkWalkLlamaCpp(b *testing.B)  { benchWalk(b, "/Users/shearer/vaktex/llama.cpp") }
 func BenchmarkWalkJuiceShop(b *testing.B) { benchWalk(b, "/Users/shearer/vaktex/juice-shop") }
