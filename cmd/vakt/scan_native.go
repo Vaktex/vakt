@@ -64,7 +64,13 @@ func nativeScan(ctx context.Context, o ScanOptions, prog *report.Progress) (*rep
 	if o.ModelPath != "" {
 		repo, rev = "local:"+filepath.Base(o.ModelPath), ""
 	}
+	iso, err := ast.NewIsolated(0)
+	if err != nil {
+		return nil, err
+	}
+	defer iso.Close()
 	cfg := pipeline.Config{
+		Isolate:     iso,
 		Root:        o.Root,
 		Walk:        walk.Options{Include: o.Include, Exclude: o.Exclude, MaxFileBytes: o.MaxFileBytes, FollowSymlinks: o.FollowSymlinks, NoRepoIgnores: o.NoRepoIgnores, Jobs: o.Jobs},
 		AST:         ast.Options{},

@@ -38,7 +38,7 @@ func OpenCache(dir string) (*Cache, error) {
 		_, err := tx.CreateBucketIfNotExists(bucket)
 		return err
 	}); err != nil {
-		db.Close()
+		_ = db.Close() // the Update error is the one to report
 		return nil, err
 	}
 	return &Cache{db: db}, nil

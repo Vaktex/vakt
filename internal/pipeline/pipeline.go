@@ -29,9 +29,13 @@ import (
 
 // Config configures Run (CONTRACTS.md).
 type Config struct {
-	Root        string
-	Walk        walk.Options
-	AST         ast.Options
+	Root string
+	Walk walk.Options
+	AST  ast.Options
+	// Isolate, when set, parses each file in a worker process under a
+	// memory and time budget (see ast.Isolated). Required for untrusted
+	// trees: tree-sitter's error recovery cannot be bounded in-process.
+	Isolate     *ast.Isolated
 	BatchTokens int // padded tokens per batch (0: engine's MaxBatchTokens)
 	Jobs        int
 	MinTokens   int     // units with fewer prompt tokens are skipped (0: keep all)
@@ -156,13 +160,25 @@ func Run(ctx context.Context, cfg Config, engines []core.Engine, tok core.Tokeni
 					addSkip(f.Rel, "not source code")
 					continue
 				}
-				us, err := ast.Extract(ctx, f.Rel, lang, src, cfg.AST)
+				var us []core.Unit
+				var err error
+				if cfg.Isolate != nil {
+					us, err = cfg.Isolate.Extract(ctx, f.Rel, lang, src, cfg.AST)
+				} else {
+					us, err = ast.Extract(ctx, f.Rel, lang, src, cfg.AST)
+				}
 				f.Data, src = nil, nil // units hold copies; let the file go
 				if ctx.Err() != nil {
 					return
 				}
-				if errors.Is(err, ast.ErrParseTimeout) {
+				switch {
+				case errors.Is(err, ast.ErrParseTimeout):
 					addSkip(f.Rel, "parse timed out; scored as a whole file")
+				case errors.Is(err, ast.ErrParseLimit):
+					addSkip(f.Rel, "parse exceeded its memory/time budget; scored as a whole file")
+				case err != nil && ctx.Err() == nil && len(us) == 0:
+					addSkip(f.Rel, "parse failed")
+					continue
 				}
 				prog.FilesParsed.Add(1)
 				nFiles.Add(1)
@@ -332,6 +348,10 @@ func Run(ctx context.Context, cfg Config, engines []core.Engine, tok core.Tokeni
 	return report.Build(meta, out, cfg.Threshold), nil
 }
 
+// fastPathMaxBytes: units longer than this are sent straight to the
+// splitter (16 bytes per token of context is far above real code's ~3.5).
+const fastPathMaxBytes = 16 * core.MaxTokens
+
 // maxInflightSourceBytes bounds unit source waiting for the tokenizers.
 const maxInflightSourceBytes = 64 << 20
 
@@ -346,10 +366,17 @@ func unitWeight(u core.Unit) int64 {
 func encodeUnit(u core.Unit, tok core.Tokenizer) []core.Encoded {
 	// Fast path: most units fit, so tokenize once and done. Only units whose
 	// prompt exceeds the context pay for SplitOversize's search.
-	text := tokenize.Render(u.Language, u.Code)
-	if ids, err := tok.Encode(text); err == nil && len(ids) > 0 && len(ids) <= core.MaxTokens {
-		u.Code = "" // downstream needs only IDs; never retain the source
-		return []core.Encoded{{Unit: u, IDs: ids, Key: tokenize.PromptKey(text)}}
+	// Code far larger than any fitting prompt (source averages 3-4 bytes
+	// per token; beyond fastPathMaxBytes it cannot fit) skips the whole-unit
+	// encode: the Rust encoder needs ~180 B of scratch per input byte, so
+	// encoding 2 MB whole-file units just to learn they are too big cost
+	// gigabytes. The splitter only tokenizes budget-sized windows.
+	if len(u.Code) <= fastPathMaxBytes {
+		text := tokenize.Render(u.Language, u.Code)
+		if ids, err := tok.Encode(text); err == nil && len(ids) > 0 && len(ids) <= core.MaxTokens {
+			u.Code = "" // downstream needs only IDs; never retain the source
+			return []core.Encoded{{Unit: u, IDs: ids, Key: tokenize.PromptKey(text)}}
+		}
 	}
 	// Oversize: SplitOversize bounds its search window near the budget, so
 	// each probe tokenizes ~budget-sized text.
