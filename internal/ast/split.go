@@ -74,7 +74,10 @@ func bestCut(s string, count func(string) int, budget int) int {
 	// the budget, not the whole remaining unit: start at ~8 bytes per token
 	// and double until the prefix no longer fits (or covers s). Probing a
 	// 2 MiB unit then costs O(log) tokenizations of ~budget-sized text.
-	lo, hi := 0, min(len(s), max(budget*8, 64))
+	// Code averages ~2-4 bytes per token: start the window at 3 bytes per
+	// token (a prefix of that size almost never fits), doubling on the rare
+	// dense case.
+	lo, hi := 0, min(len(s), max(budget*3, 64))
 	for hi < len(s) && count(s[:hi]) <= budget {
 		lo = hi
 		hi = min(len(s), hi*2)
@@ -94,8 +97,9 @@ func bestCut(s string, count func(string) int, budget int) int {
 			}
 		}
 	}
-	// Coarse is fine: the final cut snaps back to a line boundary anyway.
-	for lo < hi && hi-lo > 64 {
+	// Coarse is fine: the final cut snaps back to a line boundary anyway
+	// (and parts may be slightly under the budget).
+	for lo < hi && hi-lo > max(hi/64, 64) {
 		mid := (lo + hi + 1) / 2
 		if count(s[:mid]) <= budget {
 			lo = mid
