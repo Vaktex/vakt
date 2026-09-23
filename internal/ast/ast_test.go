@@ -343,3 +343,61 @@ func TestCleanStripsControls(t *testing.T) {
 		t.Fatalf("clean: %q", got)
 	}
 }
+
+// Regressions from the completeness review on real code.
+func TestCompletenessRegressions(t *testing.T) {
+	type want struct{ kind, name string }
+	cases := []struct {
+		lang, file, src string
+		want            []want // exact non-residual units, in order
+	}{
+		{"C++", "a.h", "struct common_sampler;\nstruct llama_context;\nvoid f(struct llama_context * ctx);\nstruct S {\n  int x;\n};\n", []want{{"class", "S"}}},
+		{"Rust", "a.rs", "impl<R: Read> Deserializer<R> {\n    pub fn new(r: R) -> Self {\n        todo!()\n    }\n}\nimpl<T> From<T> for Wrapper<T> {\n    fn from(t: T) -> Self {\n        Wrapper(t)\n    }\n}\nimpl<'r, 'h> FusedIterator for Matches<'r, 'h> {}\n",
+			[]want{{"method", "Deserializer.new"}, {"method", "Wrapper.from"}, {"class", "Matches"}}},
+		{"JavaScript", "a.js", "p.then(function (a) {\n  one()\n  two()\n}).catch(function (e) {\n  three()\n  four()\n})\nTHREE.Curve.create(function () {\n  a()\n  b()\n}, function () {\n  c()\n  d()\n})\n",
+			[]want{{"function", "p.then callback"}, {"function", "catch callback"}, {"function", "THREE.Curve.create callback"}, {"function", "THREE.Curve.create callback"}}},
+		{"C", "a.c", "static const char\n  *names[] = {\"a\"};\nint f(void) {\n  return 0;\n}\n", []want{{"function", "f"}}},
+		{"C#", "a.cs", "class C {\n  public static C operator +(C a, C b) {\n    return a;\n  }\n  public static implicit operator int(C c) {\n    return 1;\n  }\n  public int P { get; set; }\n}\n",
+			[]want{{"method", "C.operator +"}, {"method", "C.operator int"}}},
+		{"C++", "a.cpp", "struct B {\n  operator bool() const {\n    return true;\n  }\n};\n", []want{{"method", "B.operator bool"}}},
+		{"C++", "t.cpp", "typedef struct {\n  int a;\n} q8_block;\n", []want{{"class", "q8_block"}}},
+		{"Solidity", "w.sol", "contract W {\n  receive() external payable {\n    x = 1;\n  }\n}\n", []want{{"method", "W.receive"}}},
+		{"TypeScript", "a.ts", "export default async () => {\n  a()\n  b()\n}\n", []want{{"function", "default"}}},
+	}
+	for _, c := range cases {
+		units, err := Extract(context.Background(), c.file, c.lang, []byte(c.src), Options{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var got []want
+		for _, u := range units {
+			if u.Kind != core.KindResidual {
+				got = append(got, want{u.Kind, u.Name})
+			}
+		}
+		if fmt.Sprint(got) != fmt.Sprint(c.want) {
+			t.Errorf("%s %s:\n got  %v\n want %v", c.lang, c.file, got, c.want)
+		}
+	}
+	// The C line above f must not be attached to f.
+	units, _ := Extract(context.Background(), "a.c", "C", []byte("static const char\n  *names[] = {\"a\"};\nint f(void) {\n  return 0;\n}\n"), Options{})
+	for _, u := range units {
+		if u.Name == "f" && u.StartLine != 3 {
+			t.Errorf("C comment attach pulled code: f starts at %d", u.StartLine)
+		}
+	}
+	// Python matrix-multiply continuation is not a decorator.
+	units, _ = Extract(context.Background(), "a.py", "Python", []byte("x = (a\n     @ beta)\ndef g():\n    return 1\n"), Options{})
+	for _, u := range units {
+		if u.Name == "g" && u.StartLine != 3 {
+			t.Errorf("python @ continuation attached: g starts at %d", u.StartLine)
+		}
+	}
+	// C++ explicit instantiation is not a template header.
+	units, _ = Extract(context.Background(), "a.cpp", "C++", []byte("template void foo<int>(int);\nvoid bar() {\n  return;\n}\n"), Options{})
+	for _, u := range units {
+		if u.Name == "bar" && u.StartLine != 2 {
+			t.Errorf("explicit instantiation attached: bar starts at %d", u.StartLine)
+		}
+	}
+}
