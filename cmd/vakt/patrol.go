@@ -120,7 +120,7 @@ func newPatrolCmd() *cobra.Command {
 	f.BoolVar(&o.NoCache, "no-cache", false, "don't read or write the score cache")
 	f.StringVar(&o.Model, "model", defaultModel, "a local model.safetensors path, or hf:owner/name[@revision]")
 	f.StringVar(&o.ModelRevision, "revision", "", "model revision (overrides @revision in --model)")
-	f.StringVar(&o.Precision, "precision", "fp32", "compute precision: fp32 or bf16")
+	f.StringVar(&o.Precision, "precision", "fp32", "compute precision: fp32 (exact), tf32 (~1.7x faster on GPU) or bf16 (~2x faster)")
 	f.StringVar(&o.Device, "device", "auto", "device: auto, gpu or cpu")
 	f.StringVar(&devices, "devices", "", "comma-separated GPU indices to use (e.g. 0,1)")
 	f.Int64Var(&o.MaxFileBytes, "max-file-bytes", defaultMaxFileBytes, "skip files larger than this")
@@ -167,9 +167,9 @@ func (o *ScanOptions) finish(devices string, outSet, revisionSet bool) error {
 		return errors.New("--max-file-bytes must be positive")
 	}
 	switch o.Precision {
-	case "fp32", "bf16":
+	case "fp32", "tf32", "bf16":
 	default:
-		return fmt.Errorf("--precision must be fp32 or bf16 (got %q)", o.Precision)
+		return fmt.Errorf("--precision must be fp32, tf32 or bf16 (got %q)", o.Precision)
 	}
 	switch o.Device {
 	case "auto", "gpu", "cpu":
