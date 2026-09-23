@@ -16,7 +16,13 @@ concurrency:
 
 env:
   GARBLE_VERSION: v0.18.0
-  CUDA_IMAGE: nvidia/cuda:13.0.3-cudnn-devel-ubuntu24.04
+  # ubuntu22.04 base => glibc 2.35 floor, matching install.sh MIN_GLIBC.
+  # Pinned by digest (tag 13.0.3-cudnn-devel-ubuntu22.04).
+  CUDA_IMAGE: nvidia/cuda@sha256:047cef4ac7248a01c715042dea75757268851abf1a0e6dcbd7648ff1180f1b89
+  STATICCHECK_VERSION: 2026.2.1
+  GOSEC_VERSION: v2.29.0
+  GOVULNCHECK_VERSION: v1.8.0
+  RUST_TOOLCHAIN: 1.98.1
 
 jobs:
   lint:
@@ -34,18 +40,23 @@ jobs:
       - name: Tools
         run: |
           sudo apt-get update && sudo apt-get install -y --no-install-recommends shellcheck bats
-          go install honnef.co/go/tools/cmd/staticcheck@latest
-          go install github.com/securego/gosec/v2/cmd/gosec@latest
-          go install golang.org/x/vuln/cmd/govulncheck@latest
+          go install "honnef.co/go/tools/cmd/staticcheck@${STATICCHECK_VERSION}"
+          go install "github.com/securego/gosec/v2/cmd/gosec@${GOSEC_VERSION}"
+          go install "golang.org/x/vuln/cmd/govulncheck@${GOVULNCHECK_VERSION}"
+          rustup toolchain install "${RUST_TOOLCHAIN}" --profile minimal && rustup default "${RUST_TOOLCHAIN}"
+      - name: Tokenizers static lib (linked by internal/tokenize)
+        run: make deps-tokenizers BACKEND=fake
       - name: Lint (no native engine)
-        run: make lint BACKEND=fake
+        run: |
+          make lint BACKEND=fake
+          shellcheck .github/scripts/*.sh
       - name: Unit tests (no native engine)
         run: make test BACKEND=fake
       - name: Installer tests
         run: |
-          bats test/
-          sudo apt-get install -y --no-install-recommends dash
-          VAKT_TEST_SHELL=/bin/dash bats test/
+          bats test/                          # /bin/sh is dash on Ubuntu
+          sudo apt-get install -y --no-install-recommends busybox
+          VAKT_TEST_SHELL="busybox sh" bats test/
 
   macos:
     name: macos-arm64-metal
@@ -65,7 +76,7 @@ jobs:
         run: |
           brew install ccache
           go install "mvdan.cc/garble@${GARBLE_VERSION}"
-          rustup show active-toolchain || rustup default stable
+          rustup toolchain install "${RUST_TOOLCHAIN}" --profile minimal && rustup default "${RUST_TOOLCHAIN}"
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0 # zizmor: ignore[cache-poisoning]
         # Release (tag) builds always build native deps from source.
         if: ${{ !startsWith(github.ref, 'refs/tags/') }}
@@ -95,9 +106,13 @@ jobs:
           VAKT_TEST_DEVICE: cpu
         run: make parity
       - name: Release build
-        run: make prod VERSION="${GITHUB_REF_NAME}" COMMIT="${GITHUB_SHA::7}"
+        run: |
+          . .github/scripts/version.sh
+          make prod VERSION="$VAKT_VERSION" COMMIT="${GITHUB_SHA::7}"
       - name: Audit
-        run: make audit
+        run: |
+          . .github/scripts/version.sh
+          make audit VERSION="$VAKT_VERSION"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: vakt-darwin-arm64
@@ -141,14 +156,14 @@ jobs:
             .ccache
           key: native-linux-${{ matrix.arch }}-cuda13-${{ hashFiles('third_party/mlx/VERSIONS', 'third_party/mlx/build.sh', 'third_party/tokenizers/build.sh') }}
       - name: Build in CUDA 13 container
-        env:
-          REF_NAME: ${{ github.ref_name }}
         run: |
+          . .github/scripts/version.sh
           docker run --rm \
             -v "$PWD:/src" -w /src \
             -e CCACHE_DIR=/src/.ccache \
-            -e VERSION="$REF_NAME" -e COMMIT="${GITHUB_SHA::7}" \
-            -e GARBLE_VERSION \
+            -e VERSION="$VAKT_VERSION" -e COMMIT="${GITHUB_SHA::7}" \
+            -e GARBLE_VERSION -e RUST_TOOLCHAIN \
+            -e JOBS=3 \
             "$CUDA_IMAGE" \
             bash .github/scripts/linux-build.sh cuda
       - name: Unit tests (no GPU on hosted runners)
@@ -169,8 +184,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { runner: ubuntu-24.04, arch: amd64 }
-          - { runner: ubuntu-24.04-arm, arch: arm64 }
+          - { runner: ubuntu-22.04, arch: amd64 }
+          - { runner: ubuntu-22.04-arm, arch: arm64 }
     env:
       BACKEND: cpu
     steps:
@@ -186,6 +201,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends cmake ninja-build ccache libopenblas-dev liblapack-dev liblapacke-dev
           go install "mvdan.cc/garble@${GARBLE_VERSION}"
+          rustup toolchain install "${RUST_TOOLCHAIN}" --profile minimal && rustup default "${RUST_TOOLCHAIN}"
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0 # zizmor: ignore[cache-poisoning]
         # Release (tag) builds always build native deps from source.
         if: ${{ !startsWith(github.ref, 'refs/tags/') }}
@@ -209,9 +225,13 @@ jobs:
         if: steps.fixtures.outputs.available == 'true' && matrix.arch == 'amd64'
         run: make parity
       - name: Release build
-        run: make prod VERSION="${GITHUB_REF_NAME}" COMMIT="${GITHUB_SHA::7}"
+        run: |
+          . .github/scripts/version.sh
+          make prod VERSION="$VAKT_VERSION" COMMIT="${GITHUB_SHA::7}"
       - name: Audit
-        run: make audit
+        run: |
+          . .github/scripts/version.sh
+          make audit VERSION="$VAKT_VERSION"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: vakt-linux-${{ matrix.arch }}-cpu
@@ -226,7 +246,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-15, ubuntu-24.04]
+        os: [macos-15, ubuntu-22.04, ubuntu-24.04, ubuntu-22.04-arm]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -256,7 +276,10 @@ jobs:
     name: gpu-parity (self-hosted)
     # Self-hosted GPU runners never run untrusted code: only pushes and tags
     # on this repository, and only when the runner is enabled.
-    if: github.event_name != 'pull_request' && github.repository_owner == 'vaktex' && vars.ENABLE_GPU_RUNNER == 'true'
+    if: >-
+      github.repository == 'vaktex/vakt' && vars.ENABLE_GPU_RUNNER == 'true' &&
+      (github.event_name == 'push' ||
+       (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'))
     needs: [linux-cuda]
     runs-on: [self-hosted, linux, gpu]
     timeout-minutes: 120
@@ -314,12 +337,13 @@ jobs:
           subject-path: |
             dist/vakt-*
             dist/install.sh
+            dist/SHA256SUMS
       - name: Publish release
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.ref_name }}
         run: |
-          gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --title "Vaktex OSS $TAG" --generate-notes \
+          gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --title "Vaktex OSS $TAG" --generate-notes --verify-tag \
             dist/vakt-darwin-arm64 \
             dist/vakt-linux-amd64-cuda13 dist/vakt-linux-arm64-cuda13 \
             dist/vakt-linux-amd64-cpu dist/vakt-linux-arm64-cpu \

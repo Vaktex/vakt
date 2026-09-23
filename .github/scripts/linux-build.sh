@@ -16,10 +16,13 @@ apt-get install -y -qq --no-install-recommends \
 
 arch=$(dpkg --print-architecture)
 tarball="go${GO_VERSION}.linux-${arch}.tar.gz"
+# Pinned checksums (from go.dev); bump together with go.mod's go directive.
+case "${GO_VERSION}-${arch}" in
+1.27.1-amd64) want=63d339f0da5ab53635a56f2490a7984dfe12dfcff22ad749f63edaf590168445 ;;
+1.27.1-arm64) want=3450b45a3f9ee8568792736a5c5e70a1f2e9b36c35a8f74958c03e51d7d92bec ;;
+*) echo "no pinned checksum for go${GO_VERSION} ${arch}; add it to linux-build.sh" >&2; exit 1 ;;
+esac
 curl --proto '=https' --tlsv1.2 -fsSL "https://go.dev/dl/${tarball}" -o "/tmp/${tarball}"
-# Verify against go.dev's published checksum.
-want=$(curl --proto '=https' --tlsv1.2 -fsSL "https://go.dev/dl/?mode=json&include=all" |
-	python3 -c "import json,sys; f=sys.argv[1]; print(next(x['sha256'] for r in json.load(sys.stdin) for x in r['files'] if x['filename']==f))" "$tarball")
 echo "${want}  /tmp/${tarball}" | sha256sum -c -
 tar -C /usr/local -xzf "/tmp/${tarball}"
 export PATH=/usr/local/go/bin:/root/go/bin:/root/.cargo/bin:$PATH
@@ -28,8 +31,15 @@ git config --global --add safe.directory /src
 
 case $mode in
 cuda)
-	curl --proto '=https' --tlsv1.2 -fsSL https://sh.rustup.rs -o /tmp/rustup.sh
-	sh /tmp/rustup.sh -y --profile minimal >/dev/null
+	# Pinned, checksum-verified rustup-init and toolchain (see docs/BUILD.md).
+	case $arch in
+	amd64) triple=x86_64-unknown-linux-gnu; rsum=dda7234360b7f578ca8b0ddcb80145646fa61a67c1720a5abc7051b35c9fcb71 ;;
+	arm64) triple=aarch64-unknown-linux-gnu; rsum=15f6e4ce9f583b929c996c91562bad6d4454f3281de858b02cdfdef615fac433 ;;
+	esac
+	curl --proto '=https' --tlsv1.2 -fsSL "https://static.rust-lang.org/rustup/archive/1.29.1/${triple}/rustup-init" -o /tmp/rustup-init
+	echo "${rsum}  /tmp/rustup-init" | sha256sum -c -
+	chmod +x /tmp/rustup-init
+	/tmp/rustup-init -y --profile minimal --default-toolchain "${RUST_TOOLCHAIN:-1.98.1}" >/dev/null
 	go install "mvdan.cc/garble@${GARBLE_VERSION}"
 	make deps BACKEND=cuda
 	make prod BACKEND=cuda VERSION="${VERSION:-dev}" COMMIT="${COMMIT:-none}"

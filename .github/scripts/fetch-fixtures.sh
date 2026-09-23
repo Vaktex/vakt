@@ -32,6 +32,12 @@ if [ "$got" != "$FIXTURES_SHA256" ]; then
 	echo "::error::parity fixture checksum mismatch (got $got)"
 	exit 1
 fi
+# Only regular files and directories: symlinks, hardlinks and devices could
+# point outside the workspace (and would persist on a self-hosted runner).
+if tar --zstd -tvf "$tmp/fixtures.tar.zst" | awk '{c=substr($1,1,1)} c!="-" && c!="d" {bad=1} END{exit !bad}'; then
+	echo "::error::fixture bundle contains links or special files"
+	exit 1
+fi
 # The bundle may only contain testdata/{models,parity}/...
 tar --zstd -tf "$tmp/fixtures.tar.zst" | while IFS= read -r entry; do
 	case $entry in
@@ -40,5 +46,12 @@ tar --zstd -tf "$tmp/fixtures.tar.zst" | while IFS= read -r entry; do
 	esac
 	case $entry in *..*) echo "::error::path traversal in fixture bundle: $entry"; exit 1 ;; esac
 done
-tar --zstd -xf "$tmp/fixtures.tar.zst" --no-same-owner --no-same-permissions
+mkdir "$tmp/x"
+tar --zstd -xf "$tmp/fixtures.tar.zst" -C "$tmp/x" --no-same-owner --no-same-permissions
+if [ -n "$(find "$tmp/x" -type l -print -quit)" ]; then
+	echo "::error::fixture bundle produced symlinks"
+	exit 1
+fi
+mkdir -p testdata
+cp -R "$tmp/x/testdata/." testdata/
 echo "available=true" >>"$out"
