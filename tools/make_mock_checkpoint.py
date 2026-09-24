@@ -51,7 +51,7 @@ import torch  # noqa: E402
 from safetensors import safe_open  # noqa: E402
 from safetensors.torch import save_file  # noqa: E402
 
-from _common import MOCK_BF16, MOCK_FP32, build_classifier, sha256_file  # noqa: E402
+from _common import MOCK_BF16, MOCK_FP16, MOCK_FP32, build_classifier, sha256_file  # noqa: E402
 
 SEED = 1234
 # Two-layer heads compose their weights, so the per-layer scale that gives a
@@ -137,10 +137,11 @@ def reinit_heads(model, pooled):
 def main():
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     parser.add_argument("--out", type=Path, default=None)
-    parser.add_argument("--dtype", choices=["fp32", "bf16"], default="fp32")
+    parser.add_argument("--dtype", choices=["fp32", "bf16", "fp16"], default="fp32",
+                        help="fp16 = exactly what experiment.publish uploads (every tensor .half())")
     args = parser.parse_args()
 
-    out = args.out or (MOCK_BF16 if args.dtype == "bf16" else MOCK_FP32)
+    out = args.out or {"bf16": MOCK_BF16, "fp16": MOCK_FP16}.get(args.dtype, MOCK_FP32)
 
     from experiment.encoding import load_tokenizer
 
@@ -175,13 +176,18 @@ def main():
     # Save the published tensor set, not the training one: the contrastive
     # projection is dropped here exactly as `experiment.publish` drops it,
     # so the mock and the real checkpoint have identical keys.
-    from experiment.publish import TRAINING_ONLY_PREFIXES
+    from experiment.publish import TRAINING_ONLY_PREFIXES, inference_weights
 
-    state = {
-        name: tensor
-        for name, tensor in model.state_dict().items()
-        if not name.startswith(TRAINING_ONLY_PREFIXES)
-    }
+    if args.dtype == "fp16":
+        # The release format: publish.inference_weights itself (fp16 for
+        # every tensor, pooling and heads included; projection dropped).
+        state = inference_weights(model)
+    else:
+        state = {
+            name: tensor
+            for name, tensor in model.state_dict().items()
+            if not name.startswith(TRAINING_ONLY_PREFIXES)
+        }
     save_file(state, str(out))
 
     dtypes = collections.Counter()

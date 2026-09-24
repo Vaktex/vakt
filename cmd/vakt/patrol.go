@@ -63,7 +63,7 @@ type ScanOptions struct {
 	// Model. Exactly one of ModelPath or ModelRepo is set.
 	Model         string // the raw --model value
 	ModelPath     string // a local model.safetensors
-	ModelRepo     string // Hugging Face repo id, e.g. vaktex/dom-0.8b
+	ModelRepo     string // Hugging Face repo id, e.g. vaktex/dom-oss-0.8b
 	ModelRevision string // branch, tag or commit (default "main")
 	Precision     string // "fp32" or "bf16"
 	Device        string // "auto", "gpu" or "cpu"

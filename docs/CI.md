@@ -44,7 +44,7 @@ Native libraries (`third_party/mlx/install`, `third_party/tokenizers/lib`) and c
 
 | Variable | Purpose |
 |---|---|
-| `PARITY_FIXTURES_URL` | HTTPS URL of a `.tar.zst` containing `testdata/models/mock-dom-0.8b/model.safetensors` and `testdata/parity/*`. Build it with `tar --zstd -cf fixtures.tar.zst testdata/models/mock-dom-0.8b testdata/parity`. |
+| `PARITY_FIXTURES_URL` | HTTPS URL of a `.tar.zst` containing `testdata/models/mock-dom-0.8b/model.safetensors` and `testdata/parity/*`. Build it with `tar --zstd -cf fixtures.tar.zst testdata/models/mock-dom-0.8b testdata/models/mock-dom-0.8b-fp16 testdata/parity` (`testdata/parity/fp16` holds the reference for the fp16 release-format mock). |
 | `PARITY_FIXTURES_SHA256` | Its sha256 (64 lowercase hex characters). The bundle must match it, and may only contain paths under `testdata/models` and `testdata/parity`. |
 | `ENABLE_GPU_RUNNER` | Set to `true` once a self-hosted GPU runner is registered. |
 

@@ -26,7 +26,7 @@ The DOM-0.8B weights are private on Hugging Face. Set `HF_TOKEN` (or run
 `hf auth login`) before the first scan, then:
 
 ```sh
-vakt summon      # download the model (~1.5 GB) into the local cache
+vakt summon      # download vaktex/dom-oss-0.8b (~1.5 GB, fp16) into the local cache
 vakt doctor      # check the machine, engine and model
 ```
 
@@ -103,7 +103,15 @@ The harness implements the launch architecture of DOM-0.8B: attention pooling
 refuses checkpoints with the pre-release layout (`binary_head.weight`) with a
 clear error. When the launch weights are pushed:
 
-1. **Check the layout.** Once `vaktex/dom-0.8b` has the new weights:
+The model is published to `vaktex/dom-oss-0.8b` (private) by
+`experiment.publish` at the end of training: fp16 safetensors, with the
+contrastive `projection.*` head removed. The harness is tested against that
+exact format: `tools/make_mock_checkpoint.py --dtype fp16` builds a mock with
+`publish.inference_weights` itself, and `TestParityFP16Release` checks the
+engine against the Python reference on it (4.8e-7 at fp32 compute, 8e-4 at
+bf16).
+
+1. **Check the layout.** Once `vaktex/dom-oss-0.8b` has the weights:
 
    ```sh
    vakt summon && vakt doctor --strict
@@ -115,14 +123,15 @@ clear error. When the launch weights are pushed:
 
 2. **Pin the revision.** Pin the default to the launch commit so releases are
    reproducible. Put the commit SHA in `cmd/vakt/patrol.go` (`defaultModel`,
-   `hf:vaktex/dom-0.8b@<sha>`); the downloader verifies the file's sha256
+   `hf:vaktex/dom-oss-0.8b@<sha>`); the downloader verifies the file's sha256
    against the Hub's LFS pointer for that revision.
 
 3. **Check parity against the real weights.** Regenerate fixtures from the
    published file on the reference machine:
 
    ```sh
-   python tools/parity_fixtures.py --checkpoint <path to the downloaded model.safetensors>
+   python tools/parity_fixtures.py --checkpoint <path to the downloaded model.safetensors> \
+       --out-dir testdata/parity/release
    make parity         # engine parity: 1e-4 fp32, 1e-2 bf16
    ```
 

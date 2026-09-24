@@ -436,3 +436,50 @@ func TestPoolIgnoresNonFinitePadding(t *testing.T) {
 		}
 	}
 }
+
+// TestParityFP16Release scores the release-format checkpoint (every tensor
+// fp16, exactly what experiment.publish uploads) against a Python reference
+// computed from the same fp16 file, upcast to fp32. This is what users run.
+func TestParityFP16Release(t *testing.T) {
+	b, err := os.ReadFile(filepath.Join(testdata, "parity", "fp16", "fixtures.json"))
+	if err != nil {
+		t.Skip("parity-fp16 fixtures not present")
+	}
+	var f fixtures
+	if err := json.Unmarshal(b, &f); err != nil {
+		t.Fatal(err)
+	}
+	e := openMock(t, "mock-dom-0.8b-fp16", "fp32")
+	if f.ModelSHA != e.Info().ModelSHA {
+		t.Fatalf("fixtures are for %s, checkpoint is %s", f.ModelSHA, e.Info().ModelSHA)
+	}
+	var maxS, maxP float64
+	for _, s := range f.Samples {
+		got, err := e.Score(context.Background(), [][]int32{s.IDs})
+		if err != nil {
+			t.Fatal(err)
+		}
+		maxS = math.Max(maxS, math.Abs(float64(got[0].Severity)-s.Severity))
+		for i, p := range s.Families {
+			maxP = math.Max(maxP, math.Abs(float64(got[0].Families[i])-p))
+		}
+	}
+	t.Logf("fp16 release weights, fp32 compute, %d samples: max|Δs| = %.3g, max|Δp| = %.3g", len(f.Samples), maxS, maxP)
+	if maxS > 1e-4 || maxP > 1e-4 {
+		t.Errorf("fp16 release parity exceeds 1e-4")
+	}
+	// bf16 compute on the same weights stays within the bf16 bound.
+	eb := openMock(t, "mock-dom-0.8b-fp16", "bf16")
+	maxS = 0
+	for _, s := range f.Samples {
+		got, err := eb.Score(context.Background(), [][]int32{s.IDs})
+		if err != nil {
+			t.Fatal(err)
+		}
+		maxS = math.Max(maxS, math.Abs(float64(got[0].Severity)-s.Severity))
+	}
+	t.Logf("fp16 release weights, bf16 compute: max|Δs| = %.3g", maxS)
+	if maxS > 1e-2 {
+		t.Errorf("bf16 compute on release weights: max|Δs| %.3g > 1e-2", maxS)
+	}
+}

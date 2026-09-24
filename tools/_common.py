@@ -27,6 +27,7 @@ TESTDATA = Path(
 )
 MOCK_FP32 = TESTDATA / "models" / "mock-dom-0.8b" / "model.safetensors"
 MOCK_BF16 = TESTDATA / "models" / "mock-dom-0.8b-bf16" / "model.safetensors"
+MOCK_FP16 = TESTDATA / "models" / "mock-dom-0.8b-fp16" / "model.safetensors"
 PARITY_DIR = TESTDATA / "parity"
 
 # Number of auxiliary CWE-family outputs of the published model.

@@ -51,7 +51,7 @@ The build uses `nvidia/cuda:13.0.3-cudnn-devel-ubuntu22.04` (CUDA, pinned by dig
 - Go package paths, identifiers and file names are hashed. String literals are encrypted and decoded at runtime. Panic and trace metadata are removed (`-tiny`).
 - `GOGARBLE=*` obfuscates dependencies too. If a dependency fails to build under garble, narrow it with, for example, `GOGARBLE=github.com/vaktex/*`.
 - **Not obfuscated:** the statically linked C/C++ code (MLX, tree-sitter grammars, tokenizers). It is stripped of symbols and debug info (`strip -x` on macOS, `--strip-unneeded` on Linux) but its logic is readable. That code is open source anyway; our IP is the Go orchestration and the model weights.
-- **Weights are not in the binary.** They are downloaded from `vaktex/dom-0.8b` with the user's HF credentials, and access control happens there.
+- **Weights are not in the binary.** They are downloaded from `vaktex/dom-oss-0.8b` with the user's HF credentials, and access control happens there.
 
 `make audit` fails the build in any of these cases:
 
