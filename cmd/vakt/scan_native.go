@@ -79,7 +79,7 @@ func nativeScan(ctx context.Context, o ScanOptions, prog *report.Progress) (*rep
 		MinTokens:   o.MinTokens,
 		Threshold:   o.Threshold,
 		NoCache:     o.NoCache,
-		CacheDir:    filepath.Join(filepath.Dir(hub.CacheDir()), "scores"),
+		CacheDir:    hub.ScoresDir(),
 		ModelRepo:   repo, ModelRevision: rev, Precision: o.Precision,
 	}
 	return pipeline.Run(ctx, cfg, engines, tok, prog)

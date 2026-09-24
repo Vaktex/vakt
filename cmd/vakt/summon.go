@@ -23,7 +23,7 @@ func newSummonCmd() *cobra.Command {
 		Use:   "summon",
 		Short: "Download " + brand.ModelName + " into the local cache",
 		Long: "summon downloads " + brand.ModelFile + " from Hugging Face (" + brand.ModelRepo + ") into\n" +
-			"the cache ($VAKT_CACHE, default " + hub.CacheDir() + "), verifies its sha256\n" +
+			"the cache (" + hub.CacheDir() + "; set $VAKT_CACHE to move all of vakt's caches), verifies its sha256\n" +
 			"and prints the path. The repo is private: set HF_TOKEN, run `hf auth login`,\n" +
 			"or pipe a token with --token-stdin.",
 		Args: cobra.NoArgs,

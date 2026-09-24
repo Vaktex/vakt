@@ -501,8 +501,8 @@ func TestTokenNeverInErrors(t *testing.T) {
 
 func TestCacheDirEnv(t *testing.T) {
 	t.Setenv("VAKT_CACHE", "/tmp/vakt-test-cache")
-	if CacheDir() != "/tmp/vakt-test-cache" {
-		t.Error("VAKT_CACHE ignored")
+	if CacheDir() != "/tmp/vakt-test-cache/hub" || ScoresDir() != "/tmp/vakt-test-cache/scores" {
+		t.Errorf("VAKT_CACHE: hub %s scores %s", CacheDir(), ScoresDir())
 	}
 	t.Setenv("VAKT_CACHE", "")
 	if !strings.HasSuffix(CacheDir(), filepath.Join("vakt", "hub")) {

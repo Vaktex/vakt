@@ -63,8 +63,9 @@ var (
 	ErrOffline  = errors.New("model not in the local cache")
 )
 
-// CacheDir is $VAKT_CACHE, or <user cache dir>/vakt/hub.
-func CacheDir() string {
+// RootDir is everything vakt caches: $VAKT_CACHE, or <user cache dir>/vakt.
+// Removing it removes the model and the score cache.
+func RootDir() string {
 	if d := os.Getenv("VAKT_CACHE"); d != "" {
 		return d
 	}
@@ -72,8 +73,14 @@ func CacheDir() string {
 	if err != nil {
 		d = os.TempDir()
 	}
-	return filepath.Join(d, brand.Binary, "hub")
+	return filepath.Join(d, brand.Binary)
 }
+
+// CacheDir is the model cache, RootDir()/hub.
+func CacheDir() string { return filepath.Join(RootDir(), "hub") }
+
+// ScoresDir is the score cache, RootDir()/scores.
+func ScoresDir() string { return filepath.Join(RootDir(), "scores") }
 
 // ValidateRepo checks a repo id of the form owner/name.
 func ValidateRepo(repo string) error {
