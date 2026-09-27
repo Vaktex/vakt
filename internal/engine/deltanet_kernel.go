@@ -9,8 +9,8 @@ import (
 // The Metal path of the Gated DeltaNet layer runs as three custom kernels
 // between the in_proj and out_proj matmuls:
 //
-//	proj ─► convSilu ─► gatedDelta ─► gatedNorm ─► out_proj
-//	  └──────────────────┴──(b, a)──────┘ (z)
+//	proj ─► convPrep ─► gatedDelta ─► gatedNorm ─► out_proj
+//	  └─(b, a)─┘                         (z)
 //
 // Each kernel reads its slice of the fused projection in place (row stride
 // P = 6144+2048+16+16), so none of the column splits, dtype casts, l2norms,
@@ -41,64 +41,52 @@ inline float vakt_softplus(float x) {
 }
 `
 
-// convSiluSource is the causal depthwise conv (kernel K) followed by SiLU,
-// y[b,t,c] = silu(sum_k w[k,c] * x[b,t-K+1+k,c]),
-// accumulated in float32, four channels per thread. x is the fused
-// projection [B,T,P] (only the first C columns are read), w is [K,C], y is
-// [B,T,C].
-const convSiluSource = `
-    const uint c0 = thread_position_in_grid.x * 4;
-    const uint t = thread_position_in_grid.y;
-    const uint b = thread_position_in_grid.z;
-    const int T = x_shape[1];
-    const int P = x_shape[2];
-    if (int(c0) >= C || int(t) >= T) { return; }
-    for (int e = 0; e < 4; ++e) {
-        const uint c = c0 + e;
-        float acc = 0.0f;
-        for (int k = 0; k < K; ++k) {
-            const int src = int(t) - (K - 1) + k;
-            if (src >= 0) {
-                acc += float(w[k * C + c]) * float(x[(size_t(b) * T + src) * P + c]);
-            }
-        }
-        const float s = acc / (1.0f + metal::precise::exp(-acc));
-        y[(size_t(b) * T + t) * C + c] = static_cast<OutT>(s);
-    }
-`
-
-// deltaPrepSource computes the per-(token, head) scalars of the gated delta
-// rule once, one SIMD group per (token, head), into scal [B,T,H,4]:
+// convPrepSource is the causal depthwise conv (kernel K) + SiLU fused with
+// the gated delta rule's per-(token, head) scalars, one SIMD group per
+// (token, head). Each lane owns D/32 channels of that head's q, k and v.
+// Outputs:
 //
-//	[0] qinv  = rsqrt(|q|^2 + 1e-6)      (l2norm of the conv q)
-//	[1] kinv  = rsqrt(|k|^2 + 1e-6)      (l2norm of the conv k)
-//	[2] beta  = sigmoid(b)
-//	[3] decay = exp(-exp(A_log) * softplus(a + dt_bias))   (aneg = -exp(A_log))
+//	y    [B,T,3*H*D]  conv + SiLU in OutT (q|k|v, the recurrence's input)
+//	scal [B,T,H,4]    float32:
+//	  [0] qinv  = rsqrt(|q|^2 + 1e-6)      (l2norm of the conv q)
+//	  [1] kinv  = rsqrt(|k|^2 + 1e-6)      (l2norm of the conv k)
+//	  [2] beta  = sigmoid(b)
+//	  [3] decay = exp(-exp(A_log) * softplus(a + dt_bias))   (aneg = -exp(A_log))
 //
-// They used to be recomputed inside the recurrence by all 128 value-column
-// SIMD groups of a head, which made that kernel ALU-bound on transcendentals.
-// conv is [B,T,3*H*Dk] (q|k|v); proj is the fused projection [B,T,P] with b
-// at column BOFF and a at BOFF+H.
-const deltaPrepSource = `
+// The norms are of the conv output rounded to OutT, as on the plain path.
+// x is the fused projection [B,T,P]: q|k|v in the first 3*H*D columns, b at
+// BOFF and a at BOFF+H.
+const convPrepSource = `
     const uint lane = thread_position_in_grid.x;
     const uint h = thread_position_in_grid.y;
     const uint row = thread_position_in_grid.z;
-    const int CW = conv_shape[2];
-    const int P = proj_shape[2];
-    constexpr int NP = Dk / 32;
-    const device InT* cr = conv + size_t(row) * CW;
+    const int T = x_shape[1];
+    const int P = x_shape[2];
+    const int t = int(row % uint(T));
+    constexpr int NP = D / 32;
+    constexpr int C = 3 * H * D;
     float qss = 0.0f, kss = 0.0f;
-    for (int i = 0; i < NP; ++i) {
-        const int s = lane * NP + i;
-        const float q = float(cr[h * Dk + s]);
-        const float k = float(cr[H * Dk + h * Dk + s]);
-        qss += q * q;
-        kss += k * k;
+    for (int seg = 0; seg < 3; ++seg) {
+        for (int e = 0; e < NP; ++e) {
+            const int ch = seg * H * D + h * D + lane * NP + e;
+            float acc = 0.0f;
+            for (int k = 0; k < K; ++k) {
+                const int src = t - (K - 1) + k;
+                if (src >= 0) {
+                    acc += float(w[k * C + ch]) * float(x[(size_t(row) - (K - 1) + k) * P + ch]);
+                }
+            }
+            const OutT cv = static_cast<OutT>(acc / (1.0f + metal::precise::exp(-acc)));
+            y[size_t(row) * C + ch] = cv;
+            const float f = float(cv);
+            if (seg == 0) { qss += f * f; }
+            if (seg == 1) { kss += f * f; }
+        }
     }
     qss = simd_sum(qss);
     kss = simd_sum(kss);
     if (lane == 0) {
-        const device ProjT* pr = proj + size_t(row) * P;
+        const device ProjT* pr = x + size_t(row) * P;
         device float* o = scal + (size_t(row) * H + h) * 4;
         o[0] = metal::precise::rsqrt(qss + 1e-6f);
         o[1] = metal::precise::rsqrt(kss + 1e-6f);
@@ -107,18 +95,22 @@ const deltaPrepSource = `
     }
 `
 
-// gatedDeltaSource is the gated delta rule recurrence, after the design of
-// mlx-lm's gated_delta kernel (MIT, ml-explore/mlx-lm): one SIMD group per
-// (batch, head, CPG value columns); each of the 32 lanes owns Dk/32 rows of
-// those state columns in registers, and the reductions over Dk are
-// simd_sums. It computes exactly torch_recurrent_gated_delta_rule, token by
-// token, in float32:
+// gatedDeltaSource is the gated delta rule recurrence
+// (torch_recurrent_gated_delta_rule, token by token, float32 state).
 //
-//	q, k = l2norm(conv q, k), q *= 1/sqrt(Dk)   (norms from scal)
+// Layout: a SIMD group covers 8 value columns of one (batch, head); each
+// column is owned by a quad of 4 lanes, each lane holding Dk/4 rows of the
+// state column in registers. The reductions over Dk are then two quad
+// shuffles instead of a five-level simd_sum, and each token's q and k are
+// read by 8 columns at once. The l2norm factors and decay come from
+// convPrep's scalars and are applied to the dot products, not per element:
 //
-// Handling CPG columns per SIMD group loads each token's q and k once per
-// CPG columns instead of once per column. conv is [B,T,3*H*Dk] (q|k|v);
-// scal is the deltaPrep output [B,T,H,4]. Output y is float32 [B,T,H,Dv].
+//	kv    = decay * kinv * sum(S * k)
+//	S     = decay * S + k * ((v - kv) * beta * kinv)
+//	out   = qinv / sqrt(Dk) * sum(S * q)
+//
+// which is the reference with q, k l2-normalised (q scaled by 1/sqrt(Dk)).
+// conv is [B,T,3*H*Dk] (q|k|v), scal is [B,T,H,4]; y is float32 [B,T,H,Dv].
 const gatedDeltaSource = `
     const uint lane = thread_position_in_grid.x;
     const uint jg = thread_position_in_grid.y;
@@ -129,48 +121,49 @@ const gatedDeltaSource = `
     // serves every sequence length.
     const int T = conv_shape[1];
     const int CW = conv_shape[2];
-    constexpr int NP = Dk / 32;
+    constexpr int R = Dk / 4;
+    const uint part = lane % 4;
+    const uint j = jg * 8 + lane / 4;
     const float qscale = metal::precise::rsqrt(float(Dk));
-    float state[CPG][NP];
-    for (int c = 0; c < CPG; ++c) {
-        for (int i = 0; i < NP; ++i) { state[c][i] = 0.0f; }
-    }
+    float state[R];
+    for (int i = 0; i < R; ++i) { state[i] = 0.0f; }
     for (int t = 0; t < T; ++t) {
         const size_t row = size_t(b) * T + t;
         const device InT* cr = conv + row * CW;
+        const device InT* kp = cr + H * Dk + h * Dk + part * R;
+        const device InT* qp = cr + h * Dk + part * R;
         const device float* sc = scal + (row * H + h) * 4;
         const float qinv = sc[0];
         const float kinv = sc[1];
         const float bt = sc[2];
         const float dcy = sc[3];
-        float kr[NP], qr[NP];
-        for (int i = 0; i < NP; ++i) {
-            const int s = lane * NP + i;
-            qr[i] = (float(cr[h * Dk + s]) * qinv) * qscale;
-            kr[i] = float(cr[H * Dk + h * Dk + s]) * kinv;
+        float a0 = 0.0f, a1 = 0.0f, a2 = 0.0f, a3 = 0.0f;
+        for (int i = 0; i < R; i += 4) {
+            a0 += state[i] * float(kp[i]);
+            a1 += state[i + 1] * float(kp[i + 1]);
+            a2 += state[i + 2] * float(kp[i + 2]);
+            a3 += state[i + 3] * float(kp[i + 3]);
         }
-        float kv[CPG];
-        for (int c = 0; c < CPG; ++c) {
-            kv[c] = 0.0f;
-            for (int i = 0; i < NP; ++i) {
-                state[c][i] *= dcy;
-                kv[c] += state[c][i] * kr[i];
-            }
+        float kv = (a0 + a1) + (a2 + a3);
+        kv += simd_shuffle_xor(kv, 1);
+        kv += simd_shuffle_xor(kv, 2);
+        kv *= dcy * kinv;
+        const float coef = (float(cr[2 * H * Dk + h * Dv + j]) - kv) * bt * kinv;
+        float o0 = 0.0f, o1 = 0.0f, o2 = 0.0f, o3 = 0.0f;
+        for (int i = 0; i < R; i += 4) {
+            state[i] = state[i] * dcy + float(kp[i]) * coef;
+            state[i + 1] = state[i + 1] * dcy + float(kp[i + 1]) * coef;
+            state[i + 2] = state[i + 2] * dcy + float(kp[i + 2]) * coef;
+            state[i + 3] = state[i + 3] * dcy + float(kp[i + 3]) * coef;
+            o0 += state[i] * float(qp[i]);
+            o1 += state[i + 1] * float(qp[i + 1]);
+            o2 += state[i + 2] * float(qp[i + 2]);
+            o3 += state[i + 3] * float(qp[i + 3]);
         }
-        float o[CPG];
-        for (int c = 0; c < CPG; ++c) {
-            const int j = jg * CPG + c;
-            const float dl = (float(cr[2 * H * Dk + h * Dv + j]) - simd_sum(kv[c])) * bt;
-            o[c] = 0.0f;
-            for (int i = 0; i < NP; ++i) {
-                state[c][i] += kr[i] * dl;
-                o[c] += state[c][i] * qr[i];
-            }
-        }
-        for (int c = 0; c < CPG; ++c) {
-            const float oc = simd_sum(o[c]);
-            if (lane == 0) { y[(row * H + h) * Dv + jg * CPG + c] = oc; }
-        }
+        float o = (o0 + o1) + (o2 + o3);
+        o += simd_shuffle_xor(o, 1);
+        o += simd_shuffle_xor(o, 2);
+        if (part == 0) { y[(row * H + h) * Dv + j] = o * (qinv * qscale); }
     }
 `
 
@@ -327,17 +320,16 @@ const attnGateSource = `
 
 // kernels are the Metal kernels of the fused path (nil off Metal).
 type kernels struct {
-	conv, prep, delta, norm, swiglu *mlx.Kernel
-	addNorm, attnPrep, attnGate     *mlx.Kernel
+	convPrep, delta, norm, swiglu *mlx.Kernel
+	addNorm, attnPrep, attnGate   *mlx.Kernel
 }
 
 func newKernels() *kernels {
 	return &kernels{
-		conv:   mlx.NewKernel("vakt_causal_conv_silu", []string{"x", "w"}, []string{"y"}, convSiluSource, ""),
-		prep:   mlx.NewKernel("vakt_gated_delta_prep", []string{"conv", "proj", "aneg", "dtbias"}, []string{"scal"}, deltaPrepSource, kernelHeader),
-		delta:  mlx.NewKernel("vakt_gated_delta_cols", []string{"conv", "scal"}, []string{"y"}, gatedDeltaSource, ""),
-		norm:   mlx.NewKernel("vakt_gated_rmsnorm", []string{"core", "proj", "w"}, []string{"out"}, gatedNormSource, kernelHeader),
-		swiglu: mlx.NewKernel("vakt_swiglu", []string{"gu"}, []string{"out"}, swigluSource, kernelHeader),
+		convPrep: mlx.NewKernel("vakt_conv_delta_prep", []string{"x", "w", "aneg", "dtbias"}, []string{"y", "scal"}, convPrepSource, kernelHeader),
+		delta:    mlx.NewKernel("vakt_gated_delta_quads", []string{"conv", "scal"}, []string{"y"}, gatedDeltaSource, ""),
+		norm:     mlx.NewKernel("vakt_gated_rmsnorm", []string{"core", "proj", "w"}, []string{"out"}, gatedNormSource, kernelHeader),
+		swiglu:   mlx.NewKernel("vakt_swiglu", []string{"gu"}, []string{"out"}, swigluSource, kernelHeader),
 
 		addNorm:  mlx.NewKernel("vakt_add_rmsnorm", []string{"r", "d", "w"}, []string{"h", "n"}, addNormSource, ""),
 		attnPrep: mlx.NewKernel("vakt_attn_prep", []string{"proj", "qw", "kw"}, []string{"q", "k", "v"}, attnPrepSource, ""),
@@ -349,8 +341,7 @@ func (k *kernels) free() {
 	if k == nil {
 		return
 	}
-	k.conv.Free()
-	k.prep.Free()
+	k.convPrep.Free()
 	k.delta.Free()
 	k.norm.Free()
 	k.swiglu.Free()
@@ -365,42 +356,35 @@ const (
 	projBOff = linQKVDim + linValueWidth // 8192 (b), then a at +linHeads
 )
 
-// convSilu runs the depthwise conv + SiLU over the q|k|v columns of proj
-// [B,T,P]. The output [B,T,6144] keeps proj's dtype.
-func (k *kernels) convSilu(x *mlx.Ctx, proj, taps *mlx.Array, B, T int) *mlx.Array {
+// convPrep runs the conv + SiLU over the q|k|v columns of proj [B,T,P] and
+// the per-(token, head) scalars: conv [B,T,6144] in proj's dtype and scal
+// float32 [B,T,16,4].
+func (k *kernels) convPrepOp(x *mlx.Ctx, proj *mlx.Array, L layerW, B, T int) (conv, scal *mlx.Array) {
 	dt := proj.Dtype()
-	return x.Apply(k.conv, []*mlx.Array{proj, taps}, mlx.KernelLaunch{
-		Grid:           [3]int{linQKVDim / 4, T, B}, // 4 channels per thread
-		ThreadGroup:    [3]int{256, 1, 1},
-		Outputs:        []mlx.KernelOutput{{Shape: []int{B, T, linQKVDim}, Dtype: dt}},
-		TemplateInts:   map[string]int{"K": convKernel, "C": linQKVDim},
-		TemplateDtypes: map[string]mlx.DType{"OutT": dt},
-	})[0]
+	o := x.Apply(k.convPrep, []*mlx.Array{proj, L.convTapsKC, L.aLogNeg, L.dtBias}, mlx.KernelLaunch{
+		Grid:        [3]int{32, linHeads, B * T},
+		ThreadGroup: [3]int{32, linHeads, 1},
+		Outputs: []mlx.KernelOutput{
+			{Shape: []int{B, T, linQKVDim}, Dtype: dt},
+			{Shape: []int{B, T, linHeads, 4}, Dtype: mlx.Float32},
+		},
+		TemplateInts:   map[string]int{"H": linHeads, "D": linKeyDim, "K": convKernel, "BOFF": projBOff},
+		TemplateDtypes: map[string]mlx.DType{"OutT": dt, "ProjT": dt},
+	})
+	return o[0], o[1]
 }
 
-// deltaCols is the number of value columns one SIMD group of the
-// recurrence carries (state registers per lane: deltaCols * Dk/32).
-const deltaCols = 4
+// convPrepSource indexes q, k and v heads with one D.
+var _ [linKeyDim - linValDim]struct{}
 
-// deltaPrep computes the per-(token, head) scalars: float32 [B,T,16,4].
-func (k *kernels) deltaPrep(x *mlx.Ctx, conv, proj *mlx.Array, L layerW, B, T int) *mlx.Array {
-	return x.Apply(k.prep, []*mlx.Array{conv, proj, L.aLogNeg, L.dtBias}, mlx.KernelLaunch{
-		Grid:           [3]int{32, linHeads, B * T},
-		ThreadGroup:    [3]int{32, linHeads, 1},
-		Outputs:        []mlx.KernelOutput{{Shape: []int{B, T, linHeads, 4}, Dtype: mlx.Float32}},
-		TemplateInts:   map[string]int{"H": linHeads, "Dk": linKeyDim, "BOFF": projBOff},
-		TemplateDtypes: map[string]mlx.DType{"InT": conv.Dtype(), "ProjT": proj.Dtype()},
-	})[0]
-}
-
-// gatedDelta runs the recurrence over conv with deltaPrep's scalars.
+// gatedDelta runs the recurrence over conv with convPrep's scalars.
 // Returns float32 [B,T,16,128].
 func (k *kernels) gatedDelta(x *mlx.Ctx, conv, scal *mlx.Array, B, T int) *mlx.Array {
 	return x.Apply(k.delta, []*mlx.Array{conv, scal}, mlx.KernelLaunch{
-		Grid:           [3]int{32, linValDim / deltaCols, B * linHeads},
-		ThreadGroup:    [3]int{32, 8, 1},
+		Grid:           [3]int{32, linValDim / 8, B * linHeads}, // 8 columns per SIMD group
+		ThreadGroup:    [3]int{32, 4, 1},
 		Outputs:        []mlx.KernelOutput{{Shape: []int{B, T, linHeads, linValDim}, Dtype: mlx.Float32}},
-		TemplateInts:   map[string]int{"H": linHeads, "Dk": linKeyDim, "Dv": linValDim, "CPG": deltaCols},
+		TemplateInts:   map[string]int{"H": linHeads, "Dk": linKeyDim, "Dv": linValDim},
 		TemplateDtypes: map[string]mlx.DType{"InT": conv.Dtype()},
 	})[0]
 }
