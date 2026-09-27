@@ -1,0 +1,296 @@
+{
+  "schema_version": "1",
+  "tool": {
+    "name": "Vaktex OSS",
+    "binary": "vakt",
+    "version": "dev",
+    "commit": "none"
+  },
+  "model": {
+    "repo": "vaktex/dom-oss-0.8b",
+    "revision": "main",
+    "sha256": "abababababababababababababababababababababababababababababababab",
+    "backend": "metal",
+    "device": "Apple M5 Pro",
+    "precision": "fp32"
+  },
+  "scan": {
+    "root": "/src/app",
+    "started_at": "2026-09-23T06:00:00Z",
+    "duration_ms": 2500,
+    "files": 5,
+    "units": 6,
+    "tokens": 33070,
+    "tokens_per_sec": 13228,
+    "cache_hits": 1,
+    "skipped": [
+      {
+        "file": "assets/app.min.js",
+        "reason": "minified"
+      }
+    ]
+  },
+  "units": [
+    {
+      "file": "src/net.c",
+      "language": "C",
+      "kind": "function",
+      "name": "read_packet",
+      "start_line": 12,
+      "end_line": 48,
+      "tokens": 900,
+      "severity": 0.93,
+      "families": {
+        "access_control": 0.01,
+        "authentication": 0.01,
+        "authorization": 0.01,
+        "communication_security": 0.01,
+        "credentials_and_secrets": 0.01,
+        "cryptographic_issues": 0.01,
+        "data_neutralization": 0.01,
+        "data_processing": 0.01,
+        "error_handling": 0.01,
+        "file_and_path": 0.01,
+        "initialization_and_cleanup": 0.01,
+        "memory_safety": 0.91,
+        "resource_management": 0.01,
+        "serialization_and_parsing": 0.01,
+        "session_management": 0.01,
+        "synchronization_and_concurrency": 0.01,
+        "web_security": 0.01,
+        "other": 0.01
+      },
+      "top_family": "memory_safety",
+      "top_family_prob": 0.91,
+      "flagged": true
+    },
+    {
+      "file": "src/parse.c",
+      "language": "C",
+      "kind": "function",
+      "name": "parse_header",
+      "start_line": 10,
+      "end_line": 400,
+      "tokens": 31000,
+      "severity": 0.88,
+      "families": {
+        "access_control": 0.01,
+        "authentication": 0.01,
+        "authorization": 0.01,
+        "communication_security": 0.01,
+        "credentials_and_secrets": 0.01,
+        "cryptographic_issues": 0.01,
+        "data_neutralization": 0.01,
+        "data_processing": 0.01,
+        "error_handling": 0.01,
+        "file_and_path": 0.6,
+        "initialization_and_cleanup": 0.01,
+        "memory_safety": 0.9,
+        "resource_management": 0.01,
+        "serialization_and_parsing": 0.01,
+        "session_management": 0.01,
+        "synchronization_and_concurrency": 0.01,
+        "web_security": 0.01,
+        "other": 0.01
+      },
+      "top_family": "memory_safety",
+      "top_family_prob": 0.9,
+      "flagged": true,
+      "truncated": true,
+      "split_of": 2,
+      "parts": [
+        {
+          "split_part": 1,
+          "start_line": 10,
+          "end_line": 200,
+          "tokens": 16000,
+          "severity": 0.55,
+          "top_family": "file_and_path",
+          "top_family_prob": 0.6
+        },
+        {
+          "split_part": 2,
+          "start_line": 201,
+          "end_line": 400,
+          "tokens": 15000,
+          "severity": 0.88,
+          "top_family": "memory_safety",
+          "top_family_prob": 0.9,
+          "truncated": true
+        }
+      ]
+    },
+    {
+      "file": "app/views.py",
+      "language": "Python",
+      "kind": "function",
+      "name": "search",
+      "start_line": 5,
+      "end_line": 30,
+      "tokens": 400,
+      "severity": 0.78,
+      "families": {
+        "access_control": 0.01,
+        "authentication": 0.01,
+        "authorization": 0.01,
+        "communication_security": 0.01,
+        "credentials_and_secrets": 0.01,
+        "cryptographic_issues": 0.01,
+        "data_neutralization": 0.82,
+        "data_processing": 0.01,
+        "error_handling": 0.01,
+        "file_and_path": 0.01,
+        "initialization_and_cleanup": 0.01,
+        "memory_safety": 0.01,
+        "resource_management": 0.01,
+        "serialization_and_parsing": 0.01,
+        "session_management": 0.01,
+        "synchronization_and_concurrency": 0.01,
+        "web_security": 0.01,
+        "other": 0.01
+      },
+      "top_family": "data_neutralization",
+      "top_family_prob": 0.82,
+      "flagged": true
+    },
+    {
+      "file": "app/views.py",
+      "language": "Python",
+      "kind": "method",
+      "name": "Admin.delete",
+      "start_line": 40,
+      "end_line": 60,
+      "tokens": 350,
+      "severity": 0.61,
+      "families": {
+        "access_control": 0.01,
+        "authentication": 0.01,
+        "authorization": 0.7,
+        "communication_security": 0.01,
+        "credentials_and_secrets": 0.01,
+        "cryptographic_issues": 0.01,
+        "data_neutralization": 0.01,
+        "data_processing": 0.01,
+        "error_handling": 0.01,
+        "file_and_path": 0.01,
+        "initialization_and_cleanup": 0.01,
+        "memory_safety": 0.01,
+        "resource_management": 0.01,
+        "serialization_and_parsing": 0.01,
+        "session_management": 0.01,
+        "synchronization_and_concurrency": 0.01,
+        "web_security": 0.01,
+        "other": 0.01
+      },
+      "top_family": "authorization",
+      "top_family_prob": 0.7,
+      "flagged": true
+    },
+    {
+      "file": "app/util.py",
+      "language": "Python",
+      "kind": "residual",
+      "start_line": 1,
+      "end_line": 20,
+      "tokens": 120,
+      "severity": 0.2,
+      "families": {
+        "access_control": 0.01,
+        "authentication": 0.01,
+        "authorization": 0.01,
+        "communication_security": 0.01,
+        "credentials_and_secrets": 0.01,
+        "cryptographic_issues": 0.01,
+        "data_neutralization": 0.01,
+        "data_processing": 0.01,
+        "error_handling": 0.01,
+        "file_and_path": 0.01,
+        "initialization_and_cleanup": 0.01,
+        "memory_safety": 0.01,
+        "resource_management": 0.01,
+        "serialization_and_parsing": 0.01,
+        "session_management": 0.01,
+        "synchronization_and_concurrency": 0.01,
+        "web_security": 0.01,
+        "other": 0.01
+      },
+      "top_family": "synchronization_and_concurrency",
+      "top_family_prob": 0.01,
+      "flagged": false
+    },
+    {
+      "file": "src/net.c",
+      "language": "C",
+      "kind": "function",
+      "name": "checksum",
+      "start_line": 50,
+      "end_line": 70,
+      "tokens": 300,
+      "severity": 0.12,
+      "families": {
+        "access_control": 0.01,
+        "authentication": 0.01,
+        "authorization": 0.01,
+        "communication_security": 0.01,
+        "credentials_and_secrets": 0.01,
+        "cryptographic_issues": 0.01,
+        "data_neutralization": 0.01,
+        "data_processing": 0.01,
+        "error_handling": 0.01,
+        "file_and_path": 0.01,
+        "initialization_and_cleanup": 0.01,
+        "memory_safety": 0.01,
+        "resource_management": 0.01,
+        "serialization_and_parsing": 0.01,
+        "session_management": 0.01,
+        "synchronization_and_concurrency": 0.01,
+        "web_security": 0.01,
+        "other": 0.01
+      },
+      "top_family": "synchronization_and_concurrency",
+      "top_family_prob": 0.01,
+      "flagged": false,
+      "cached": true
+    }
+  ],
+  "files": [
+    {
+      "file": "src/net.c",
+      "language": "C",
+      "max_severity": 0.93,
+      "flagged_units": 1,
+      "units": 2
+    },
+    {
+      "file": "src/parse.c",
+      "language": "C",
+      "max_severity": 0.88,
+      "flagged_units": 1,
+      "units": 1
+    },
+    {
+      "file": "app/views.py",
+      "language": "Python",
+      "max_severity": 0.78,
+      "flagged_units": 2,
+      "units": 2
+    },
+    {
+      "file": "app/util.py",
+      "language": "Python",
+      "max_severity": 0.2,
+      "flagged_units": 0,
+      "units": 1
+    }
+  ],
+  "summary": {
+    "threshold": 0.5,
+    "flagged_units": 4,
+    "flagged_files": 3,
+    "by_family": {
+      "authorization": 1,
+      "data_neutralization": 1,
+      "memory_safety": 2
+    }
+  }
+}

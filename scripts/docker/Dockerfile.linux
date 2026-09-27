@@ -1,0 +1,74 @@
+# syntax=docker/dockerfile:1
+#
+# Linux release build for vakt. BACKEND=cuda (default) or cpu.
+#   docker buildx build -f scripts/docker/Dockerfile.linux \
+#     --platform linux/amd64 --build-arg BACKEND=cuda --output type=local,dest=dist .
+#
+# The CUDA image provides nvcc, cuBLAS, cuDNN 9 and NVRTC for CUDA 13. The
+# resulting binary links cudart statically and cuBLAS/cuDNN/NVRTC
+# dynamically, so hosts need the CUDA 13 runtime libraries and driver >= 580.
+
+ARG CUDA_IMAGE=nvidia/cuda:13.0.3-cudnn-devel-ubuntu22.04@sha256:047cef4ac7248a01c715042dea75757268851abf1a0e6dcbd7648ff1180f1b89
+ARG CPU_IMAGE=ubuntu:22.04
+ARG BACKEND=cuda
+
+FROM ${CUDA_IMAGE} AS base-cuda
+FROM ${CPU_IMAGE} AS base-cpu
+
+FROM base-${BACKEND} AS build
+ARG BACKEND
+ARG GO_VERSION=1.27.1
+ARG GO_SHA256_amd64=63d339f0da5ab53635a56f2490a7984dfe12dfcff22ad749f63edaf590168445
+ARG GO_SHA256_arm64=3450b45a3f9ee8568792736a5c5e70a1f2e9b36c35a8f74958c03e51d7d92bec
+ARG RUSTUP_VERSION=1.29.1
+ARG RUSTUP_SHA256_amd64=dda7234360b7f578ca8b0ddcb80145646fa61a67c1720a5abc7051b35c9fcb71
+ARG RUSTUP_SHA256_arm64=15f6e4ce9f583b929c996c91562bad6d4454f3281de858b02cdfdef615fac433
+ARG RUST_TOOLCHAIN=1.98.1
+# MLX needs cmake >= 3.25; ubuntu22.04 ships 3.22. Pinned Kitware release.
+ARG CMAKE_VERSION=3.31.8
+ARG CMAKE_SHA256_amd64=630615d8e98ac33eba7fbe472626dff5c899c85af3c024585ae109166a6909d0
+ARG CMAKE_SHA256_arm64=609735983e3bdf24b6ab379d918458d64196fe72b98226f62dd5e9fe7b2997cc
+ARG GARBLE_VERSION=v0.18.0
+ARG VERSION=dev
+ARG COMMIT=none
+ENV DEBIAN_FRONTEND=noninteractive \
+    PATH=/usr/local/go/bin:/root/go/bin:/root/.cargo/bin:${PATH}
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      ca-certificates curl git build-essential ninja-build ccache pkg-config \
+      libopenblas-dev liblapack-dev liblapacke-dev unzip \
+    && rm -rf /var/lib/apt/lists/*
+
+# Pinned, checksum-verified toolchains (Go from go.dev, rustup-init from
+# static.rust-lang.org). Binaries are still not bit-reproducible: garble uses
+# a random seed per build (see docs/BUILD.md).
+RUN set -eu; arch="$(dpkg --print-architecture)"; \
+    case "$arch" in \
+      amd64) go_sum="$GO_SHA256_amd64"; rs_sum="$RUSTUP_SHA256_amd64"; cm_sum="$CMAKE_SHA256_amd64"; cm_arch=x86_64; triple=x86_64-unknown-linux-gnu ;; \
+      arm64) go_sum="$GO_SHA256_arm64"; rs_sum="$RUSTUP_SHA256_arm64"; cm_sum="$CMAKE_SHA256_arm64"; cm_arch=aarch64; triple=aarch64-unknown-linux-gnu ;; \
+      *) echo "unsupported arch $arch"; exit 1 ;; \
+    esac; \
+    curl --proto '=https' --tlsv1.2 -fsSL "https://go.dev/dl/go${GO_VERSION}.linux-${arch}.tar.gz" -o /tmp/go.tgz; \
+    echo "${go_sum}  /tmp/go.tgz" | sha256sum -c -; \
+    tar -C /usr/local -xzf /tmp/go.tgz; rm /tmp/go.tgz; \
+    curl --proto '=https' --tlsv1.2 -fsSL "https://github.com/Kitware/CMake/releases/download/v${CMAKE_VERSION}/cmake-${CMAKE_VERSION}-linux-${cm_arch}.tar.gz" -o /tmp/cmake.tgz; \
+    echo "${cm_sum}  /tmp/cmake.tgz" | sha256sum -c -; \
+    tar -C /usr/local --strip-components=1 -xzf /tmp/cmake.tgz; rm /tmp/cmake.tgz; cmake --version; \
+    curl --proto '=https' --tlsv1.2 -fsSL "https://static.rust-lang.org/rustup/archive/${RUSTUP_VERSION}/${triple}/rustup-init" -o /tmp/rustup-init; \
+    echo "${rs_sum}  /tmp/rustup-init" | sha256sum -c -; \
+    chmod +x /tmp/rustup-init; /tmp/rustup-init -y --profile minimal --default-toolchain "${RUST_TOOLCHAIN}"; rm /tmp/rustup-init; \
+    go install "mvdan.cc/garble@${GARBLE_VERSION}"
+
+WORKDIR /src
+COPY go.mod go.sum* ./
+RUN go mod download
+COPY . .
+
+RUN --mount=type=cache,target=/root/.cache/ccache \
+    --mount=type=cache,target=/root/.cache/go-build \
+    make deps BACKEND=${BACKEND} \
+    && make prod BACKEND=${BACKEND} VERSION=${VERSION} COMMIT=${COMMIT} \
+    && make audit BACKEND=${BACKEND}
+
+FROM scratch AS out
+COPY --from=build /src/dist/ /
