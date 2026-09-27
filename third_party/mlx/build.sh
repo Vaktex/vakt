@@ -61,24 +61,10 @@ prefix="$here/install/$target"
 jobs="${JOBS:-$(getconf _NPROCESSORS_ONLN 2>/dev/null || sysctl -n hw.ncpu)}"
 build_type="${CMAKE_BUILD_TYPE:-Release}"
 
-fetch() { # dir repo tag commit (empty tag: fetch the commit itself)
+fetch() { # dir repo tag commit
 	local dir="$1" repo="$2" tag="$3" commit="$4"
-	if [[ -d "$dir/.git" && -n "$(git -C "$dir" rev-parse -q --verify "$commit^{commit}" 2>/dev/null)" && "$(git -C "$dir" rev-parse HEAD)" != "$commit" ]]; then
-		git -C "$dir" -c advice.detachedHead=false checkout --quiet --force "$commit"
-	fi
-	if [[ -d "$dir/.git" && -z "$tag" && "$(git -C "$dir" rev-parse HEAD)" != "$commit" ]]; then
-		git -C "$dir" fetch --quiet --depth 1 origin "$commit"
-		git -C "$dir" -c advice.detachedHead=false checkout --quiet --force FETCH_HEAD
-	fi
 	if [[ ! -d "$dir/.git" ]]; then
-		if [[ -n "$tag" ]]; then
-			git -c advice.detachedHead=false clone --quiet --depth 1 --branch "$tag" "$repo" "$dir"
-		else
-			git init --quiet "$dir"
-			git -C "$dir" remote add origin "$repo"
-			git -C "$dir" fetch --quiet --depth 1 origin "$commit"
-			git -C "$dir" -c advice.detachedHead=false checkout --quiet FETCH_HEAD
-		fi
+		git -c advice.detachedHead=false clone --quiet --depth 1 --branch "$tag" "$repo" "$dir"
 	fi
 	local have
 	have="$(git -C "$dir" rev-parse HEAD)"
@@ -167,21 +153,7 @@ for p in "$here"/patches/mlx-*.patch; do
 	elif git -C "$src/mlx" apply --reverse --check "$p" 2>/dev/null; then
 		: # already applied
 	else
-		echo "error: patch $(basename "$p") does not apply to mlx ${MLX_TAG:-$MLX_COMMIT}" >&2
-		exit 1
-	fi
-done
-
-# mlx-c patches: vakt's C entry points for MLX APIs mlx-c does not wrap yet.
-for p in "$here"/patches/mlxc-*.patch; do
-	[[ -e "$p" ]] || continue
-	if git -C "$src/mlx-c" apply --check "$p" 2>/dev/null; then
-		git -C "$src/mlx-c" apply "$p"
-		echo "applied $(basename "$p")"
-	elif git -C "$src/mlx-c" apply --reverse --check "$p" 2>/dev/null; then
-		: # already applied
-	else
-		echo "error: patch $(basename "$p") does not apply to mlx-c ${MLXC_TAG:-$MLXC_COMMIT}" >&2
+		echo "error: patch $(basename "$p") does not apply to mlx $MLX_TAG" >&2
 		exit 1
 	fi
 done

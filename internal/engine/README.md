@@ -3,7 +3,7 @@
 `engine.Open` loads `model.safetensors` and returns a `core.Engine`. The native engine is only built with `-tags mlx`. Without it, `Open` returns `ErrUnavailable`.
 
 ```sh
-third_party/mlx/build.sh metal          # static MLX + mlx-c at the commits in third_party/mlx/VERSIONS; also copies mlx.metallib for embedding (required before go build -tags mlx)
+third_party/mlx/build.sh metal          # static MLX v0.31.1 + mlx-c v0.6.0; also copies mlx.metallib for embedding (required before go build -tags mlx)
 go test -tags mlx ./internal/engine/... # parity and unit tests
 go build -tags mlx ./cmd/vakt
 ```
@@ -15,7 +15,7 @@ go build -tags mlx ./cmd/vakt
 | RMSNorm: `x̂ · (1 + w)`, computed in f32 | `rmsNorm`, with `(1 + w)` folded in at load |
 | Decoder layer: pre-norm residual | `forward` |
 | Gated attention: q_proj holds query and gate per head; q/k RMSNorm; partial RoPE (64 of 256, θ = 1e7, rotate_half); GQA 8/2; output × sigmoid(gate) | `attention` (fused q\|k\|v projection, MLX `fast.rope`, `fast.scaled_dot_product_attention` in causal mode) |
-| Gated DeltaNet: mask padding; in_proj_qkv; causal depthwise conv (k=4) + SiLU; l2norm q/k; q × 1/√128; β = σ(b); g = −exp(A_log) · softplus(a + dt_bias); gated delta rule; RMSNormGated (plain w) · SiLU(z); out_proj | `linearAttention` (fused qkv\|z\|b\|a projection; on Metal `convDeltaPrep`, MLX's chunked `gated_delta_update` and `gatedNorm`) |
+| Gated DeltaNet: mask padding; in_proj_qkv; causal depthwise conv (k=4) + SiLU; l2norm q/k; q × 1/√128; β = σ(b); g = −exp(A_log) · softplus(a + dt_bias); gated delta rule; RMSNormGated (plain w) · SiLU(z); out_proj | `linearAttention` (fused qkv\|z\|b\|a projection; on Metal three fused kernels: `convSilu`, `gatedDelta`, `gatedNorm`) |
 | `AttentionPool` (f32): 4 queries × 256, keys/values without bias, scores × 1/16 masked to −1e4 before the softmax, weighted sum of values, project + LayerNorm (eps 1e-5) | `attentionPool` |
 | `MLPHead` (f32) for binary_head and auxiliary_head: LayerNorm → Linear 1024→2048 → exact (erf) GELU → Linear, then sigmoid | `mlpHead`, `mlxEngine.Score` |
 
@@ -40,13 +40,6 @@ MLX turns on TF32 for f32 GPU matmuls by default (`MLX_ENABLE_TF32=1`). `mlx.Ini
 
 On Metal the whole DeltaNet mixer between `in_proj` and `out_proj` is three kernels that read their columns of the fused projection in place, and the MLP activation is one more. The plain-ops path made ~20 full passes over `[B·T, 2048..6144]` tensors per layer (splits, casts, l2norms, sigmoids, reshape copies), which left the layer memory-bound once the matmuls got fast.
 
-On Metal the default DeltaNet path is:
-
-- `convDeltaPrep`: causal depthwise conv + SiLU fused with the recurrence's per-token prologue. One SIMD group per (token, head) reads the q, k and v channels of the projection, rounds the conv output to the compute dtype where the plain path does, and writes l2-normalised (and, for q, scaled) q and k, v, the decay exp(g) and β = σ(b), all float32. The decay stays float32 because MLX's kernel reads it in its input dtype and takes its log; a decay near 1 in fp16 is off by up to 2.4e-4 per token, which compounds over a long memory.
-- MLX's `fast.gated_delta_update` (ml-explore/mlx#4020): the chunk-parallel (WY) form of the gated delta rule, 16-token chunks on the matmul units of M5-class GPUs and 8-token simdgroup-matrix chunks elsewhere. mlx-c does not wrap it yet, so `third_party/mlx/patches/mlxc-gated-delta.patch` adds `mlx_fast_gated_delta_update`.
-
-`VAKT_DELTANET=kernel` selects vakt's own recurrence kernels instead (kept for comparison):
-
 - `convSilu`: causal depthwise conv plus SiLU in one pass, reading the q|k|v columns of the projection. MLX's general `conv1d` was about 10× slower here.
 - `deltaPrep`: the per-(token, head) scalars of the recurrence, computed once: the l2norm factors of q and k, β = σ(b) and the decay exp(g), g = −exp(A_log) · softplus(a + dt_bias).
 - `gatedDelta`: the gated delta recurrence. One SIMD group carries 4 value columns of one (batch, head) with the state in registers, so each token's q and k are loaded once per 4 columns. (Computing the prologue inside every column's SIMD group made this the top stage in `VAKT_PROFILE`: 27% of forward time on an M5 Pro.) It follows the design of mlx-lm's `gated_delta` kernel (MIT) and matches `torch_recurrent_gated_delta_rule` in f32.
@@ -57,7 +50,7 @@ On Metal the default DeltaNet path is:
 
 `TestFusedMatchesPlainRelease` compares the fused path with the plain-ops path on the published weights (set `VAKT_RELEASE_MODEL`).
 
-`TestFusedMatchesPlainRelease` (published weights) and `TestDeltaKernelMatchesChunked` (mocks) check both fused paths against the plain-ops path (`VAKT_DELTANET=chunked`). On the fused path the padding mask before `in_proj` is skipped: sequences are right-padded and every mixer is causal, so padded positions never reach a real one, and pooling masks them. Template arguments are passed in sorted order: MLX names compiled kernels by their template values in argument order, so Go's map order used to recompile the same kernel once per permutation.
+`TestDeltaKernelMatchesChunked` checks the fused path against the plain-ops path (`VAKT_DELTANET=chunked`). Template arguments are passed in sorted order: MLX names compiled kernels by their template values in argument order, so Go's map order used to recompile the same kernel once per permutation.
 - `deltaChunked`: the portable path, used on CPU and CUDA and when `VAKT_DELTANET=chunked` is set. It is HF's `torch_chunk_gated_delta_rule` (chunk 64, forward-substitution inverse) in plain ops. It is evaluated chunk by chunk, so memory stays bounded at any length: 12.5 GB peak at T=16384 on CPU, including 3 GB of weights.
 - `deltaScanOps`: the per-token recurrence, kept as a test reference only (`VAKT_DELTANET=scan`).
 
@@ -65,7 +58,7 @@ On Metal the default DeltaNet path is:
 
 - **Padding:** sequences are right-padded, and results don't depend on what else is in the batch. `TestBatchInvariance` checks this.
 - **Pooling:** it uses `where(mask, h, 0)`, so a NaN from padding can never leak into the pooled vector.
-- **Per-layer evaluation:** the residual stream is evaluated every few layers and those layers' intermediates are released: every 3 layers for batches up to 8192 padded tokens, every layer above that (`VAKT_EVAL_EVERY=N` overrides). A single 24-layer lazy graph was about 90× slower.
+- **Per-layer evaluation:** the residual stream is evaluated after each layer (`VAKT_EVAL_EVERY`, default 1), and that layer's intermediates are released. A single 24-layer lazy graph was about 90× slower.
 - **Batch size:** `MaxBatchTokens()` is 32768 padded tokens on GPU and 8192 on CPU.
 
 ## CUDA builds
