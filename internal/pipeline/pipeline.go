@@ -15,6 +15,7 @@ import (
 	"errors"
 	"fmt"
 	"golang.org/x/sync/semaphore"
+	"maps"
 	"sort"
 	"strings"
 	"sync"
@@ -240,10 +241,39 @@ func Run(ctx context.Context, cfg Config, engines []core.Engine, tok core.Tokeni
 	// 4. Cache lookup + batching + scoring.
 	modelKey := info.ModelSHA
 	scoreErr := make(chan error, len(engines))
+	// Cache writes are a bbolt transaction with an fsync each (a full
+	// flush on macOS): keep them off the engine goroutines so the device
+	// never waits on the disk. The writer merges whatever has queued.
+	var putC chan map[string]cached
+	if cache != nil {
+		putC = make(chan map[string]cached, 64)
+		all.Add(1)
+		go func() {
+			defer all.Done()
+			for m := range putC {
+				for more := true; more; {
+					select {
+					case m2, ok := <-putC:
+						if !ok {
+							more = false
+							break
+						}
+						maps.Copy(m, m2)
+					default:
+						more = false
+					}
+				}
+				_ = cache.Put(m)
+			}
+		}()
+	}
 	all.Add(1)
 	go func() {
 		defer all.Done()
 		defer close(results)
+		if putC != nil {
+			defer close(putC) // after wgEng.Wait below: no more writers
+		}
 		b := newBatcher(budget, maxSeqs)
 		work := make(chan []core.Encoded, len(engines))
 		var wgEng sync.WaitGroup
@@ -252,7 +282,7 @@ func Run(ctx context.Context, cfg Config, engines []core.Engine, tok core.Tokeni
 			go func(eng core.Engine) {
 				defer wgEng.Done()
 				for batch := range work {
-					if err := scoreBatch(ctx, eng, batch, cache, modelKey, info.Precision, results, prog); err != nil {
+					if err := scoreBatch(ctx, eng, batch, putC, modelKey, info.Precision, results, prog); err != nil {
 						scoreErr <- err
 						cancel(err)
 						// Drain so the dispatcher never blocks.
@@ -405,8 +435,9 @@ func encodeUnit(u core.Unit, tok core.Tokenizer) []core.Encoded {
 	return out
 }
 
-// scoreBatch runs one batch and emits results (and writes them to cache).
-func scoreBatch(ctx context.Context, eng core.Engine, batch []core.Encoded, cache *Cache, modelKey, prec string, results chan<- report.Result, prog *report.Progress) error {
+// scoreBatch runs one batch and emits results (and queues them for the
+// cache writer when puts is non-nil).
+func scoreBatch(ctx context.Context, eng core.Engine, batch []core.Encoded, puts chan<- map[string]cached, modelKey, prec string, results chan<- report.Result, prog *report.Progress) error {
 	ids := make([][]int32, len(batch))
 	toks := 0
 	for i, e := range batch {
@@ -426,7 +457,13 @@ func scoreBatch(ctx context.Context, eng core.Engine, batch []core.Encoded, cach
 			return ctx.Err()
 		}
 	}
-	_ = cache.Put(put)
+	if puts != nil {
+		select {
+		case puts <- put:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
 	prog.UnitsScored.Add(int64(len(batch)))
 	prog.TokensScored.Add(int64(toks))
 	return nil

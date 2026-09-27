@@ -7,8 +7,9 @@ import (
 )
 
 // batcher groups encoded units into padded batches under a token budget
-// (longest sequence x count). Units are held in length buckets (powers of
-// two) so sequences in one batch have similar lengths and little padding.
+// (longest sequence x count). Units are held in narrow length buckets (see
+// bucketOf) so sequences in one batch have similar lengths and little
+// padding: padded positions cost the engine as much as real ones.
 type batcher struct {
 	budget  int
 	maxSeqs int
@@ -26,12 +27,20 @@ func newBatcher(budget, maxSeqs int) *batcher {
 	return &batcher{budget: max(budget, 1), maxSeqs: max(maxSeqs, 1), buckets: map[int][]core.Encoded{}}
 }
 
+// bucketOf rounds a length up to its bucket: multiples of 16 up to 128,
+// then eight equal steps per octave, so padding within a bucket is at most
+// 12.5% (power-of-two buckets from 64 wasted up to half of every batch, and
+// most of a batch of short functions).
 func bucketOf(n int) int {
-	b := 64
-	for b < n {
-		b <<= 1
+	if n <= 128 {
+		return max(16, (n+15)/16*16)
 	}
-	return b
+	o := 128
+	for o*2 < n {
+		o <<= 1
+	}
+	step := o / 8
+	return (n + step - 1) / step * step
 }
 
 // add queues e and returns any batches that became full.
@@ -50,21 +59,33 @@ func (b *batcher) add(e core.Encoded) [][]core.Encoded {
 	return out
 }
 
-// flush returns everything left, one or more batches per bucket.
+// flush returns everything left. Neighbouring buckets are merged (padding
+// up to flushSlack) rather than flushed one small batch per bucket.
 func (b *batcher) flush() [][]core.Encoded {
-	keys := make([]int, 0, len(b.buckets))
-	for k := range b.buckets {
-		keys = append(keys, k)
+	var rest []core.Encoded
+	for k, q := range b.buckets {
+		rest = append(rest, q...)
+		delete(b.buckets, k)
 	}
-	sort.Ints(keys)
+	b.held = 0
+	sort.Slice(rest, func(i, j int) bool { return len(rest[i].IDs) > len(rest[j].IDs) })
 	var out [][]core.Encoded
-	for _, k := range keys {
-		for len(b.buckets[k]) > 0 {
-			out = append(out, b.take(k))
+	for len(rest) > 0 {
+		width := len(rest[0].IDs)
+		limit := max(1, min(b.budget/max(width, 1), b.maxSeqs))
+		n := 1
+		for n < len(rest) && n < limit && len(rest[n].IDs)*flushSlack >= width*(flushSlack-1) {
+			n++
 		}
+		out = append(out, rest[:n:n])
+		rest = rest[n:]
 	}
 	return out
 }
+
+// flushSlack bounds padding in flushed batches: every unit is at least
+// (flushSlack-1)/flushSlack of the batch's longest.
+const flushSlack = 4
 
 // take removes one batch from bucket k: as many units as fit the budget
 // when padded to the longest unit taken.

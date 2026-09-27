@@ -128,7 +128,7 @@ func mcpScan(stderr io.Writer) mcp.ScanFunc {
 			Exclude:      req.Exclude,
 			MaxFileBytes: defaultMaxFileBytes,
 			TopLevel:     req.TopLevel,
-			Precision:    "fp32",
+			Precision:    defaultPrecision,
 			Device:       "auto",
 		}
 		spec, err := parseModelSpec(defaultModel, "")

@@ -249,7 +249,7 @@ func (w *weights) free() {
 type deltaMode int
 
 const (
-	deltaKernel    deltaMode = iota // Metal kernel (GPU on darwin)
+	deltaKernel    deltaMode = iota // fused Metal kernels (GPU on darwin)
 	deltaChunkMode                  // chunked algorithm with plain ops (portable default)
 	deltaScan                       // per-token scan with plain ops (test reference only)
 )
@@ -259,9 +259,8 @@ type model struct {
 	w         *weights
 	cancelled func() bool // checked between layers
 	delta     deltaMode
-	kern      *mlx.Kernel
-	convKern  *mlx.Kernel
-	evalEvery int // materialise the residual every N layers (0 = one graph)
+	kern      *kernels // fused Metal kernels (nil off Metal)
+	evalEvery int      // materialise the residual every N layers (0 = one graph)
 }
 
 // forward returns the float32 last hidden state after the final norm,
@@ -295,7 +294,7 @@ func (m *model) forward(x *mlx.Ctx, ids *mlx.Array, mask *mlx.Array, lengths []i
 		h = lx.Add(r, lx.AsType(mixed, mlx.Float32))
 		r = h
 		n = m.rmsNorm(lx, h, L.postNorm)
-		h = lx.Add(r, lx.AsType(m.mlp(lx, n, L), mlx.Float32))
+		h = lx.Add(r, lx.AsType(m.mlp(lx, n, L, B, T), mlx.Float32))
 		if m.evalEvery > 0 && (i+1)%m.evalEvery == 0 {
 			if err := lx.Eval(h); err != nil {
 				x.Fail(err)
@@ -326,8 +325,11 @@ func (m *model) rmsNorm(x *mlx.Ctx, h, scale *mlx.Array) *mlx.Array {
 	return x.AsType(x.RMSNorm(x.AsType(h, mlx.Float32), scale, rmsEps), m.w.compute)
 }
 
-func (m *model) mlp(x *mlx.Ctx, h *mlx.Array, L layerW) *mlx.Array {
+func (m *model) mlp(x *mlx.Ctx, h *mlx.Array, L layerW, B, T int) *mlx.Array {
 	gu := x.Matmul(h, L.gateUp) // [B, T, 2I]
+	if m.kern != nil {
+		return x.Matmul(m.kern.swigluOp(x, gu, B, T), L.down)
+	}
 	parts := x.SplitAt(gu, -1, intermediate)
 	return x.Matmul(x.Multiply(x.Silu(parts[0]), parts[1]), L.down)
 }
@@ -395,18 +397,19 @@ func (m *model) linearAttention(x *mlx.Ctx, h, mask *mlx.Array, L layerW, length
 	// apply_mask_to_padding_states: zero padded positions first.
 	h = x.Multiply(h, x.AsType(mask, h.Dtype()))
 	proj := x.Matmul(h, L.inProj) // [B, T, 6144+2048+16+16]
+	if m.delta == deltaKernel && m.kern != nil {
+		// Metal: three fused kernels read their columns of proj in place.
+		conv := m.kern.convSilu(x, proj, L.convTapsKC, B, T)
+		core := m.kern.gatedDelta(x, conv, proj, L, B, T)
+		return x.Matmul(m.kern.gatedNorm(x, core, proj, L.gnorm, h.Dtype(), B, T), L.outProj)
+	}
 	p := x.SplitAt(proj, -1, linQKVDim, linQKVDim+linValueWidth, linQKVDim+linValueWidth+linHeads)
 	mixed, z, bb, aa := p[0], p[1], p[2], p[3]
 
 	// Depthwise causal conv (kernel 4) + SiLU over the q|k|v channels,
 	// written as K shifted multiply-adds: y[t] = sum_k w[k] * x[t-(K-1)+k].
 	// MLX's general conv1d is ~10x slower for this tiny depthwise kernel.
-	var conv *mlx.Array
-	if m.convKern != nil {
-		conv = m.convSilu(x, mixed, L.convTapsKC, B, T, linQKVDim)
-	} else {
-		conv = x.Silu(causalDepthwise(x, mixed, L.convTaps, B, T, linQKVDim))
-	}
+	conv := x.Silu(causalDepthwise(x, mixed, L.convTaps, B, T, linQKVDim))
 
 	qkv := x.SplitAt(conv, -1, linHeads*linKeyDim, 2*linHeads*linKeyDim)
 	q := x.Reshape(x.AsType(qkv[0], mlx.Float32), B, T, linHeads, linKeyDim)
@@ -423,8 +426,6 @@ func (m *model) linearAttention(x *mlx.Ctx, h, mask *mlx.Array, L layerW, length
 
 	var core *mlx.Array // [B, T, 16, 128] f32
 	switch {
-	case m.delta == deltaKernel && m.kern != nil:
-		core = m.deltaKernel(x, q, k, v, g, beta, B, T)
 	case m.delta == deltaScan:
 		core = deltaScanOps(x, q, k, v, g, beta, B, T)
 	default:

@@ -39,17 +39,9 @@ func open(opts Options) (core.Engine, error) {
 		prec = "fp32"
 	}
 	switch prec {
-	case "fp32", "bf16":
-	case "tf32":
+	case "fp32", "tf32", "bf16", "auto":
 	default:
-		return nil, fmt.Errorf("engine: precision must be fp32, tf32 or bf16, got %q", prec)
-	}
-
-	// MLX reads MLX_ENABLE_TF32 once per process, so the matmul mode is fixed
-	// by the first engine; a later engine asking for another mode is refused
-	// rather than silently running in the wrong one.
-	if err := pinMatmulMode(prec == "tf32"); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("engine: precision must be auto, fp32, tf32 or bf16, got %q", prec)
 	}
 
 	// 1. The file is untrusted: validate its header before MLX parses it.
@@ -104,6 +96,18 @@ func open(opts Options) (core.Engine, error) {
 		return nil, fmt.Errorf("engine: device must be auto, gpu or cpu, got %q", opts.Device)
 	}
 	configureMemory(backend)
+	if prec == "auto" {
+		prec = autoPrecision(backend)
+	}
+
+	// MLX reads MLX_ENABLE_TF32 once per process, so the matmul mode is fixed
+	// by the first engine; a later engine asking for another mode is refused
+	// rather than silently running in the wrong one. Nothing above runs a
+	// matmul.
+	if err := pinMatmulMode(prec == "tf32"); err != nil {
+		s.Free()
+		return nil, err
+	}
 
 	// 3. Load and lay out the weights.
 	x := mlx.NewCtx(s)
@@ -140,13 +144,22 @@ func open(opts Options) (core.Engine, error) {
 		m.delta = deltaChunkMode
 	}
 	if backend == "metal" && os.Getenv("VAKT_DELTANET") == "" {
-		m.delta, m.kern = deltaKernel, newDeltaKernel()
-		m.convKern = newConvKernel()
+		m.delta, m.kern = deltaKernel, newKernels()
 	}
 	return &mlxEngine{
 		s: s, m: m, maxBT: maxBatchTokens(backend),
 		info: core.EngineInfo{Backend: backend, Device: device, Precision: prec, ModelSHA: strings.ToLower(sha)},
 	}, nil
+}
+
+// autoPrecision is the "auto" precision: TF32 matmuls on a GPU (Apple's
+// NAX matmul units and NVIDIA tensor cores; ~1e-3 score drift, and on older
+// Apple GPUs identical to fp32), exact fp32 on CPU, where TF32 does nothing.
+func autoPrecision(backend string) string {
+	if backend == "cpu" {
+		return "fp32"
+	}
+	return "tf32"
 }
 
 func (e *mlxEngine) Info() core.EngineInfo { return e.info }
@@ -156,8 +169,7 @@ func (e *mlxEngine) MaxBatchTokens() int { return e.maxBT }
 func (e *mlxEngine) Close() error {
 	if e.m != nil {
 		e.m.w.free()
-		e.m.kern.Free()
-		e.m.convKern.Free()
+		e.m.kern.free()
 		e.m = nil
 	}
 	e.s.Free()

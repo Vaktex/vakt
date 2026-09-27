@@ -15,7 +15,7 @@ go build -tags mlx ./cmd/vakt
 | RMSNorm: `x̂ · (1 + w)`, computed in f32 | `rmsNorm`, with `(1 + w)` folded in at load |
 | Decoder layer: pre-norm residual | `forward` |
 | Gated attention: q_proj holds query and gate per head; q/k RMSNorm; partial RoPE (64 of 256, θ = 1e7, rotate_half); GQA 8/2; output × sigmoid(gate) | `attention` (fused q\|k\|v projection, MLX `fast.rope`, `fast.scaled_dot_product_attention` in causal mode) |
-| Gated DeltaNet: mask padding; in_proj_qkv; causal depthwise conv (k=4) + SiLU; l2norm q/k; q × 1/√128; β = σ(b); g = −exp(A_log) · softplus(a + dt_bias); gated delta rule; RMSNormGated (plain w) · SiLU(z); out_proj | `linearAttention` (fused qkv\|z\|b\|a projection, `convSilu` Metal kernel, `deltaKernel` Metal kernel) |
+| Gated DeltaNet: mask padding; in_proj_qkv; causal depthwise conv (k=4) + SiLU; l2norm q/k; q × 1/√128; β = σ(b); g = −exp(A_log) · softplus(a + dt_bias); gated delta rule; RMSNormGated (plain w) · SiLU(z); out_proj | `linearAttention` (fused qkv\|z\|b\|a projection; on Metal three fused kernels: `convSilu`, `gatedDelta`, `gatedNorm`) |
 | `AttentionPool` (f32): 4 queries × 256, keys/values without bias, scores × 1/16 masked to −1e4 before the softmax, weighted sum of values, project + LayerNorm (eps 1e-5) | `attentionPool` |
 | `MLPHead` (f32) for binary_head and auxiliary_head: LayerNorm → Linear 1024→2048 → exact (erf) GELU → Linear, then sigmoid | `mlpHead`, `mlxEngine.Score` |
 
@@ -25,8 +25,8 @@ The mRoPE sections reduce to 1D RoPE for text-only input: all three position row
 
 | `--precision` | Weights and activations | Matmuls | Parity vs PyTorch fp32 (48 fixtures) | Metal throughput, T=2048×4 |
 |---|---|---|---|---|
-| `fp32` (default) | f32 | strict f32 (TF32 off) | max\|Δs\| 3.3e-6, max\|Δp\| 5.6e-6 | ~4.3k tok/s |
-| `tf32` | f32 | TF32 tensor cores | max\|Δs\| 1.3e-3 | ~7.1k tok/s |
+| `fp32` (default on CPU) | f32 | strict f32 (TF32 off) | max\|Δs\| 3.3e-6, max\|Δp\| 5.6e-6 | ~4.3k tok/s |
+| `tf32` (`auto` on GPU) | f32 | TF32 tensor cores | max\|Δs\| 1.3e-3 | ~7.1k tok/s |
 | `bf16` | bf16 matmul inputs | bf16 | max\|Δs\| 1.0e-2, batch invariance 2.7e-3 | ~9k tok/s |
 
 In every mode the residual stream, norms, the DeltaNet state, pooling and the heads run in f32. The bf16 checkpoint layout (bf16 backbone, f32 heads) loads in every mode.
@@ -37,8 +37,14 @@ MLX turns on TF32 for f32 GPU matmuls by default (`MLX_ENABLE_TF32=1`). `mlx.Ini
 
 ## Kernels
 
-- `deltaKernel`: the gated delta recurrence. It uses one SIMD group per (batch, head, value column) and keeps the state in registers. It follows the design of mlx-lm's `gated_delta` kernel (MIT) and matches `torch_recurrent_gated_delta_rule` exactly in f32.
-- `convSilu`: causal depthwise conv plus SiLU in one pass. MLX's general `conv1d` was about 10× slower here.
+On Metal the whole DeltaNet mixer between `in_proj` and `out_proj` is three kernels that read their columns of the fused projection in place, and the MLP activation is one more. The plain-ops path made ~20 full passes over `[B·T, 2048..6144]` tensors per layer (splits, casts, l2norms, sigmoids, reshape copies), which left the layer memory-bound once the matmuls got fast.
+
+- `convSilu`: causal depthwise conv plus SiLU in one pass, reading the q|k|v columns of the projection. MLX's general `conv1d` was about 10× slower here.
+- `gatedDelta`: the gated delta recurrence with its prologue fused in (l2norm and scaling of q/k, β = σ(b), g = −exp(A_log) · softplus(a + dt_bias)). It uses one SIMD group per (batch, head, value column) and keeps the state in registers. It follows the design of mlx-lm's `gated_delta` kernel (MIT) and matches `torch_recurrent_gated_delta_rule` in f32.
+- `gatedNorm`: RMSNormGated · SiLU(z) and the cast for `out_proj`, one SIMD group per (token, head).
+- `swiglu`: SiLU(gate) · up over the fused gate|up projection.
+
+`TestDeltaKernelMatchesChunked` checks the fused path against the plain-ops path (`VAKT_DELTANET=chunked`). Template arguments are passed in sorted order: MLX names compiled kernels by their template values in argument order, so Go's map order used to recompile the same kernel once per permutation.
 - `deltaChunked`: the portable path, used on CPU and CUDA and when `VAKT_DELTANET=chunked` is set. It is HF's `torch_chunk_gated_delta_rule` (chunk 64, forward-substitution inverse) in plain ops. It is evaluated chunk by chunk, so memory stays bounded at any length: 12.5 GB peak at T=16384 on CPU, including 3 GB of weights.
 - `deltaScanOps`: the per-token recurrence, kept as a test reference only (`VAKT_DELTANET=scan`).
 

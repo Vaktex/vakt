@@ -91,7 +91,7 @@ func nativeBench(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", errors.New("model not cached; run `" + brand.Binary + " summon` first")
 	}
-	e, err := engine.Open(engine.Options{ModelPath: path, ModelSHA: sha, Device: "auto"})
+	e, err := engine.Open(engine.Options{ModelPath: path, ModelSHA: sha, Precision: defaultPrecision, Device: "auto"})
 	if err != nil {
 		return "", err
 	}

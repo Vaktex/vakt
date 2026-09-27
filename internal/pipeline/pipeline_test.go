@@ -268,3 +268,38 @@ func TestBatcher(t *testing.T) {
 		t.Fatalf("batched %d of 500", n)
 	}
 }
+
+func TestBucketPadding(t *testing.T) {
+	prev := 0
+	for n := 1; n <= core.MaxTokens; n++ {
+		k := bucketOf(n)
+		if k < n || k < prev {
+			t.Fatalf("bucketOf(%d) = %d", n, k)
+		}
+		if n > 128 && float64(k-n) > 0.125*float64(n) {
+			t.Fatalf("bucketOf(%d) = %d pads more than 12.5%%", n, k)
+		}
+		prev = k
+	}
+}
+
+func TestBatcherFlushMergesBuckets(t *testing.T) {
+	b := newBatcher(4096, 256)
+	for i := 0; i < 40; i++ {
+		if out := b.add(core.Encoded{IDs: make([]int32, 200+i)}); len(out) != 0 {
+			t.Fatalf("batch emitted before the budget filled")
+		}
+	}
+	out := b.flush()
+	if len(out) != 3 { // 4096/239 = 17 per batch: 17 + 17 + 6
+		t.Fatalf("flush made %d batches, want 3", len(out))
+	}
+	for _, bt := range out {
+		if len(bt) > 4096/len(bt[0].IDs) {
+			t.Fatalf("batch of %d x %d over budget", len(bt), len(bt[0].IDs))
+		}
+	}
+	if len(b.flush()) != 0 || b.held != 0 {
+		t.Fatal("batcher not empty after flush")
+	}
+}

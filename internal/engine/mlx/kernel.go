@@ -9,6 +9,8 @@ package mlx
 import "C"
 
 import (
+	"maps"
+	"slices"
 	"unsafe"
 )
 
@@ -101,14 +103,17 @@ func (x *Ctx) Apply(k *Kernel, inputs []*Array, l KernelLaunch) []*Array {
 	if l.InitValue != nil {
 		C.mlx_fast_metal_kernel_config_set_init_value(cfg, C.float(*l.InitValue))
 	}
-	for name, v := range l.TemplateInts {
+	// MLX names (and caches) the compiled kernel by its template values in
+	// argument order, so add them in a fixed order: Go's map order would
+	// compile a fresh copy of the same kernel for every permutation.
+	for _, name := range slices.Sorted(maps.Keys(l.TemplateInts)) {
 		cs := C.CString(name)
-		C.mlx_fast_metal_kernel_config_add_template_arg_int(cfg, cs, cint(v))
+		C.mlx_fast_metal_kernel_config_add_template_arg_int(cfg, cs, cint(l.TemplateInts[name]))
 		C.free(unsafe.Pointer(cs))
 	}
-	for name, dt := range l.TemplateDtypes {
+	for _, name := range slices.Sorted(maps.Keys(l.TemplateDtypes)) {
 		cs := C.CString(name)
-		C.mlx_fast_metal_kernel_config_add_template_arg_dtype(cfg, cs, cdtype(dt))
+		C.mlx_fast_metal_kernel_config_add_template_arg_dtype(cfg, cs, cdtype(l.TemplateDtypes[name]))
 		C.free(unsafe.Pointer(cs))
 	}
 	in := C.mlx_vector_array_new()
