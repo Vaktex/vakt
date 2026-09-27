@@ -43,27 +43,38 @@ inline float vakt_softplus(float x) {
 
 // convSiluSource is the causal depthwise conv (kernel K) followed by SiLU,
 // y[b,t,c] = silu(sum_k w[k,c] * x[b,t-K+1+k,c]),
-// accumulated in float32, four channels per thread. x is the fused
+// accumulated in float32, four channels and TT consecutive timesteps per
+// thread (a sliding window over the input rows). x is the fused
 // projection [B,T,P] (only the first C columns are read), w is [K,C], y is
 // [B,T,C].
 const convSiluSource = `
     const uint c0 = thread_position_in_grid.x * 4;
-    const uint t = thread_position_in_grid.y;
+    const int t0 = int(thread_position_in_grid.y) * TT;
     const uint b = thread_position_in_grid.z;
     const int T = x_shape[1];
     const int P = x_shape[2];
-    if (int(c0) >= C || int(t) >= T) { return; }
+    if (int(c0) >= C || t0 >= T) { return; }
     for (int e = 0; e < 4; ++e) {
         const uint c = c0 + e;
-        float acc = 0.0f;
-        for (int k = 0; k < K; ++k) {
-            const int src = int(t) - (K - 1) + k;
-            if (src >= 0) {
-                acc += float(w[k * C + c]) * float(x[(size_t(b) * T + src) * P + c]);
-            }
+        float wv[K];
+        for (int k = 0; k < K; ++k) { wv[k] = float(w[k * C + c]); }
+        // Sliding window: input rows t0-(K-1) .. t0+TT-1, read once for TT
+        // outputs (4 reads per output before).
+        float win[TT + K - 1];
+        for (int i = 0; i < TT + K - 1; ++i) {
+            const int src = t0 - (K - 1) + i;
+            win[i] = (src >= 0 && src < T) ? float(x[(size_t(b) * T + src) * P + c]) : 0.0f;
         }
-        const float s = acc / (1.0f + metal::precise::exp(-acc));
-        y[(size_t(b) * T + t) * C + c] = static_cast<OutT>(s);
+        for (int tt = 0; tt < TT; ++tt) {
+            const int t = t0 + tt;
+            if (t >= T) { break; }
+            float acc = 0.0f;
+            for (int k = 0; k < K; ++k) {
+                if (t - (K - 1) + k >= 0) { acc += wv[k] * win[tt + k]; }
+            }
+            const float s = acc / (1.0f + metal::precise::exp(-acc));
+            y[(size_t(b) * T + t) * C + c] = static_cast<OutT>(s);
+        }
     }
 `
 
@@ -371,15 +382,19 @@ const (
 	projBOff = linQKVDim + linValueWidth // 8192 (b), then a at +linHeads
 )
 
+// convSteps is the number of consecutive timesteps one conv thread computes
+// from a sliding window of convSteps+3 input rows.
+const convSteps = 8
+
 // convSilu runs the depthwise conv + SiLU over the q|k|v columns of proj
 // [B,T,P]. The output [B,T,6144] keeps proj's dtype.
 func (k *kernels) convSilu(x *mlx.Ctx, proj, taps *mlx.Array, B, T int) *mlx.Array {
 	dt := proj.Dtype()
 	return x.Apply(k.conv, []*mlx.Array{proj, taps}, mlx.KernelLaunch{
-		Grid:           [3]int{linQKVDim / 4, T, B}, // 4 channels per thread
+		Grid:           [3]int{linQKVDim / 4, (T + convSteps - 1) / convSteps, B}, // 4 channels x convSteps steps per thread
 		ThreadGroup:    [3]int{256, 1, 1},
 		Outputs:        []mlx.KernelOutput{{Shape: []int{B, T, linQKVDim}, Dtype: dt}},
-		TemplateInts:   map[string]int{"K": convKernel, "C": linQKVDim},
+		TemplateInts:   map[string]int{"K": convKernel, "C": linQKVDim, "TT": convSteps},
 		TemplateDtypes: map[string]mlx.DType{"OutT": dt},
 	})[0]
 }
