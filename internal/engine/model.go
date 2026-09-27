@@ -434,7 +434,12 @@ func blockedCausalSDPA(x *mlx.Ctx, q, k, v *mlx.Array, scale float32, B, T int) 
 // linearAttention is the Gated DeltaNet layer.
 func (m *model) linearAttention(x *mlx.Ctx, h, mask *mlx.Array, L layerW, lengths []int, B, T int) *mlx.Array {
 	// apply_mask_to_padding_states: zero padded positions first.
-	h = x.Multiply(h, x.AsType(mask, h.Dtype()))
+	if m.kern == nil {
+		h = x.Multiply(h, x.AsType(mask, h.Dtype()))
+	}
+	// On the fused path the padding mask is skipped: sequences are
+	// right-padded and every mixer is causal, so padded positions never
+	// reach a real one, and pooling masks them out.
 	proj := m.prof.mark(x, "lin.in_proj", x.Matmul(h, L.inProj)) // [B, T, 6144+2048+16+16]
 	if m.delta == deltaKernel && m.kern != nil {
 		// Metal: three fused kernels read their columns of proj in place.
