@@ -27,8 +27,9 @@ const (
 	defaultTop         = 25
 	defaultMinTokens   = 16
 	defaultBatchTokens = 4096
-	// auto resolves to tf32 on a GPU (score drift ~1e-3 against the fp32
-	// reference) and exact fp32 on CPU; --precision fp32 keeps parity grade.
+	// auto resolves to fp16 on Metal and tf32 on CUDA (score drift ~1e-3
+	// against the fp32 reference) and exact fp32 on CPU; --precision fp32
+	// keeps parity grade.
 	defaultPrecision    = "auto"
 	defaultMaxFileBytes = 2 << 20
 	defaultOut          = brand.Binary + "-report.json"
@@ -131,7 +132,7 @@ func newPatrolCmd() *cobra.Command {
 	f.BoolVar(&o.NoCache, "no-cache", false, "don't read or write the score cache")
 	f.StringVar(&o.Model, "model", defaultModel, "a local model.safetensors path, or hf:owner/name[@revision]")
 	f.StringVar(&o.ModelRevision, "revision", "", "model revision (overrides @revision in --model)")
-	f.StringVar(&o.Precision, "precision", defaultPrecision, "compute precision: auto (tf32 on GPU, fp32 on CPU), fp32 (exact), tf32 (~1.7x faster on GPU) bf16 or fp16 (~2x faster; fp16 is native on M5-class GPUs)")
+	f.StringVar(&o.Precision, "precision", defaultPrecision, "compute precision: auto (fp16 on Metal, tf32 on CUDA, fp32 on CPU), fp32 (exact), tf32, bf16 or fp16")
 	f.StringVar(&o.Device, "device", "auto", "device: auto, gpu or cpu")
 	f.StringVar(&devices, "devices", "", "comma-separated GPU indices to use (e.g. 0,1)")
 	f.Int64Var(&o.MaxFileBytes, "max-file-bytes", defaultMaxFileBytes, "skip files larger than this")

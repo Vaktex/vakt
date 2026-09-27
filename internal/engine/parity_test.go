@@ -523,3 +523,73 @@ func TestParityRelease(t *testing.T) {
 		}
 	}
 }
+
+// TestFusedMatchesPlainRelease checks the fused Metal kernels against the
+// plain-ops path (VAKT_DELTANET=chunked) on the published weights, in fp32
+// and fp16, including a batch and a sequence long enough for blocked
+// attention. It needs the GPU and VAKT_RELEASE_MODEL.
+func TestFusedMatchesPlainRelease(t *testing.T) {
+	p := os.Getenv("VAKT_RELEASE_MODEL")
+	if p == "" {
+		t.Skip("set VAKT_RELEASE_MODEL to the downloaded model.safetensors")
+	}
+	if testDevice() == "cpu" || !gpuOK() || gpuBackend != "metal" {
+		t.Skip("fused kernels are Metal-only")
+	}
+	if os.Getenv("VAKT_DELTANET") != "" {
+		t.Skip("VAKT_DELTANET forces one mode; this test compares both")
+	}
+	mk := func(n, seed int) []int32 {
+		v := make([]int32, n)
+		for i := range v {
+			v[i] = int32((seed*7919 + i*104729) % 150000) // #nosec G115 -- small constants
+		}
+		return v
+	}
+	batches := [][][]int32{
+		{mk(37, 1)},
+		{mk(300, 2), mk(120, 3), mk(64, 4)},
+		{mk(2500, 5)},
+	}
+	for _, tc := range []struct {
+		prec string
+		tol  float64
+	}{{"fp32", 1e-4}, {"fp16", 5e-3}} {
+		fused, err := Open(Options{ModelPath: p, Precision: tc.prec, Device: testDevice()})
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("VAKT_DELTANET", "chunked")
+		plain, err := Open(Options{ModelPath: p, Precision: tc.prec, Device: testDevice()})
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = os.Unsetenv("VAKT_DELTANET")
+		if fused.(*mlxEngine).m.kern == nil || plain.(*mlxEngine).m.kern != nil {
+			t.Fatal("engines did not pick the expected paths")
+		}
+		var maxD float64
+		for _, b := range batches {
+			a, err := fused.Score(context.Background(), b)
+			if err != nil {
+				t.Fatal(err)
+			}
+			c, err := plain.Score(context.Background(), b)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for i := range a {
+				maxD = math.Max(maxD, math.Abs(float64(a[i].Severity-c[i].Severity)))
+				for j := range core.NumFamilies {
+					maxD = math.Max(maxD, math.Abs(float64(a[i].Families[j]-c[i].Families[j])))
+				}
+			}
+		}
+		fused.Close()
+		plain.Close()
+		t.Logf("%s: fused vs plain max|Δ| %.3g", tc.prec, maxD)
+		if maxD > tc.tol {
+			t.Errorf("%s: fused vs plain max|Δ| %.3g > %g", tc.prec, maxD, tc.tol)
+		}
+	}
+}

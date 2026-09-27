@@ -17,8 +17,9 @@ type Options struct {
 	// Precision is "fp32" (default, parity-grade: strict float32 math),
 	// "tf32" (float32 with TF32 GPU matmuls, ~1.7x faster, ~1e-3 drift),
 	// "bf16" (bfloat16 matmuls, ~2x faster, ~3e-2 drift), "fp16" (IEEE half
-	// matmuls, native on M5-class Apple GPUs; narrower range) or "auto" (tf32 on
-	// a GPU, fp32 on CPU). EngineInfo.Precision reports the resolved mode.
+	// matmuls, native on M5-class Apple GPUs; narrower range) or "auto"
+	// (fp16 on Metal, tf32 on CUDA, fp32 on CPU). EngineInfo.Precision
+	// reports the resolved mode.
 	Precision string
 	// Device is "auto", "gpu" or "cpu".
 	Device string

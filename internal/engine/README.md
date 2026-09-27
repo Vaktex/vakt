@@ -25,10 +25,10 @@ The mRoPE sections reduce to 1D RoPE for text-only input: all three position row
 
 | `--precision` | Weights and activations | Matmuls | Parity vs PyTorch fp32 (48 fixtures) | Metal throughput, T=2048×4 |
 |---|---|---|---|---|
-| `fp32` (default on CPU) | f32 | strict f32 (TF32 off) | max\|Δs\| 3.3e-6, max\|Δp\| 5.6e-6 | ~4.3k tok/s |
-| `tf32` (`auto` on GPU) | f32 | TF32 tensor cores | max\|Δs\| 1.3e-3 | ~7.1k tok/s |
+| `fp32` (`auto` on CPU) | f32 | strict f32 (TF32 off) | max\|Δs\| 3.3e-6, max\|Δp\| 5.6e-6 | ~4.3k tok/s |
+| `tf32` (`auto` on CUDA) | f32 | TF32 tensor cores | max\|Δs\| 1.3e-3 | ~7.1k tok/s |
 | `bf16` | bf16 matmul inputs | bf16 | max\|Δs\| 1.0e-2, batch invariance 2.7e-3 | ~9k tok/s |
-| `fp16` | f16 matmul inputs | f16 (native on M5-class matmul units) | release weights are fp16; bound 2e-2 in `TestParityRelease` | not yet measured |
+| `fp16` (`auto` on Metal) | f16 matmul inputs | f16 (native on M5-class matmul units) | release weights: max\|Δs\| 1.3e-3, max\|Δp\| 1.3e-3 (bf16 on the same fixtures: 1.2e-2) | M5 Pro real scan: 10.9k tok/s vs 9.7k tf32, 11.5k bf16 |
 
 In every mode the residual stream, norms, the DeltaNet state, pooling and the heads run in f32. The bf16 checkpoint layout (bf16 backbone, f32 heads) loads in every mode.
 
@@ -45,6 +45,10 @@ On Metal the whole DeltaNet mixer between `in_proj` and `out_proj` is three kern
 - `gatedDelta`: the gated delta recurrence. One SIMD group carries 4 value columns of one (batch, head) with the state in registers, so each token's q and k are loaded once per 4 columns. (Computing the prologue inside every column's SIMD group made this the top stage in `VAKT_PROFILE`: 27% of forward time on an M5 Pro.) It follows the design of mlx-lm's `gated_delta` kernel (MIT) and matches `torch_recurrent_gated_delta_rule` in f32.
 - `gatedNorm`: RMSNormGated · SiLU(z) and the cast for `out_proj`, one SIMD group per (token, head).
 - `swiglu`: SiLU(gate) · up over the fused gate|up projection.
+- `addRMSNorm`: each residual add fused with the RMSNorm that follows it (the next sublayer's input norm, or the final norm).
+- `attnPrep` / `attnGate`: full attention's q/k RMSNorm, partial RoPE and head-major layout in one pass, and the sigmoid gate applied while undoing SDPA's layout.
+
+`TestFusedMatchesPlainRelease` compares the fused path with the plain-ops path on the published weights (set `VAKT_RELEASE_MODEL`).
 
 `TestDeltaKernelMatchesChunked` checks the fused path against the plain-ops path (`VAKT_DELTANET=chunked`). Template arguments are passed in sorted order: MLX names compiled kernels by their template values in argument order, so Go's map order used to recompile the same kernel once per permutation.
 - `deltaChunked`: the portable path, used on CPU and CUDA and when `VAKT_DELTANET=chunked` is set. It is HF's `torch_chunk_gated_delta_rule` (chunk 64, forward-substitution inverse) in plain ops. It is evaluated chunk by chunk, so memory stays bounded at any length: 12.5 GB peak at T=16384 on CPU, including 3 GB of weights.

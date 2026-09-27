@@ -280,44 +280,69 @@ func (m *model) forward(x *mlx.Ctx, ids *mlx.Array, mask *mlx.Array, lengths []i
 	h := m.prof.mark(x, "embed", x.AsType(x.Take(w.embed, ids, 0), mlx.Float32)) // [B, T, H], owned by x
 	lx := mlx.NewCtx(x.S)                                                        // per-segment scratch
 	defer lx.Free()
+	// n is always the RMSNorm of h for the next consumer: each residual add
+	// is fused with the norm after it (the next layer's input norm, or the
+	// final norm after the last layer).
+	n := m.prof.mark(x, "norm", m.rmsNorm(x, h, w.layers[0].inNorm))
+	inLx := false // whether h and n are still owned by lx
 	for i, L := range w.layers {
 		if m.cancelled != nil && m.cancelled() {
 			x.Fail(errCancelled)
 			return x.Zeros(mlx.Float32, B, T, hidden)
 		}
-		r := h
-		n := m.prof.mark(lx, "norm", m.rmsNorm(lx, h, L.inNorm))
 		var mixed *mlx.Array
 		if isFull(i) {
 			mixed = m.attention(lx, n, L, B, T)
 		} else {
 			mixed = m.linearAttention(lx, n, mask, L, lengths, B, T)
 		}
-		h = m.prof.mark(lx, "residual", lx.Add(r, lx.AsType(mixed, mlx.Float32)))
-		r = h
-		n = m.prof.mark(lx, "norm", m.rmsNorm(lx, h, L.postNorm))
-		h = m.prof.mark(lx, "residual", lx.Add(r, lx.AsType(m.mlp(lx, n, L, B, T), mlx.Float32)))
+		h, n = m.addNorm(lx, h, mixed, L.postNorm, B, T)
+		next := w.norm
+		if i+1 < len(w.layers) {
+			next = w.layers[i+1].inNorm
+		}
+		h, n = m.addNorm(lx, h, m.mlp(lx, n, L, B, T), next, B, T)
+		inLx = true
 		if m.evalEvery > 0 && (i+1)%m.evalEvery == 0 {
-			if err := lx.Eval(h); err != nil {
+			if err := lx.Eval(h, n); err != nil {
 				x.Fail(err)
 				return x.Zeros(mlx.Float32, B, T, hidden)
 			}
-			// Hand the residual to the caller's Ctx, drop everything else.
+			// Hand the residual and its norm to the caller's Ctx, drop
+			// everything else.
 			lx.Keep(h)
+			lx.Keep(n)
 			x.Adopt(h)
+			x.Adopt(n)
 			lx.Free()
+			inLx = false
 		}
 	}
 	if err := lx.Err(); err != nil {
 		x.Fail(err)
 	}
-	out := m.prof.mark(lx, "norm", m.rmsNorm(lx, h, w.norm))
+	out := n // the final norm, fused into the last residual add
+	if !inLx {
+		return out // already evaluated and owned by x
+	}
 	if err := lx.Eval(out); err != nil {
 		x.Fail(err)
 		return x.Zeros(mlx.Float32, B, T, hidden)
 	}
 	lx.Keep(out)
 	return x.Adopt(out)
+}
+
+// addNorm returns the residual r + d (float32) and its RMSNorm with scale
+// in the compute dtype.
+func (m *model) addNorm(x *mlx.Ctx, r, d, scale *mlx.Array, B, T int) (*mlx.Array, *mlx.Array) {
+	if m.kern != nil {
+		h, n := m.kern.addRMSNorm(x, r, d, scale, m.w.compute, B, T)
+		m.prof.mark(x, "residual+norm", n)
+		return h, n
+	}
+	h := m.prof.mark(x, "residual", x.Add(r, x.AsType(d, mlx.Float32)))
+	return h, m.prof.mark(x, "norm", m.rmsNorm(x, h, scale))
 }
 
 // rmsNorm matches the reference RMSNorm: normalise in float32, multiply by (1+w)
@@ -341,6 +366,15 @@ func (m *model) mlp(x *mlx.Ctx, h *mlx.Array, L layerW, B, T int) *mlx.Array {
 // RoPE (first 64 of 256 dims, rotate_half), GQA, causal.
 func (m *model) attention(x *mlx.Ctx, h *mlx.Array, L layerW, B, T int) *mlx.Array {
 	proj := m.prof.mark(x, "attn.qkv", x.Matmul(h, L.qkv)) // [B, T, 4096+512+512]
+	if m.kern != nil {
+		// Metal: one kernel norms, rotates and lays out q/k/v; one applies
+		// the gate while undoing SDPA's head-major layout.
+		q, k, v := m.kern.attnPrepOp(x, proj, L.qNorm, L.kNorm, B, T)
+		m.prof.mark(x, "attn.norm_rope", q)
+		o := m.prof.mark(x, "attn.sdpa", blockedCausalSDPA(x, q, k, v, float32(1/math.Sqrt(headDim)), B, T))
+		o = m.prof.mark(x, "attn.gate", m.kern.attnGateOp(x, o, proj, B, T))
+		return m.prof.mark(x, "attn.o", x.Matmul(o, L.o))
+	}
 	p := x.SplitAt(proj, -1, attnHeads*headDim*2, attnHeads*headDim*2+kvHeads*headDim)
 	// q_proj output is viewed as [.., heads, 2*head_dim] then chunked: the
 	// first head_dim of each head is the query, the second is the gate.

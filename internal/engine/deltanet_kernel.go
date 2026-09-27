@@ -42,25 +42,29 @@ inline float vakt_softplus(float x) {
 `
 
 // convSiluSource is the causal depthwise conv (kernel K) followed by SiLU,
-// one thread per output element: y[b,t,c] = silu(sum_k w[k,c] * x[b,t-K+1+k,c]),
-// accumulated in float32. x is the fused projection [B,T,P] (only the first
-// C columns are read), w is [K,C], y is [B,T,C].
+// y[b,t,c] = silu(sum_k w[k,c] * x[b,t-K+1+k,c]),
+// accumulated in float32, four channels per thread. x is the fused
+// projection [B,T,P] (only the first C columns are read), w is [K,C], y is
+// [B,T,C].
 const convSiluSource = `
-    const uint c = thread_position_in_grid.x;
+    const uint c0 = thread_position_in_grid.x * 4;
     const uint t = thread_position_in_grid.y;
     const uint b = thread_position_in_grid.z;
     const int T = x_shape[1];
     const int P = x_shape[2];
-    if (int(c) >= C || int(t) >= T) { return; }
-    float acc = 0.0f;
-    for (int k = 0; k < K; ++k) {
-        const int src = int(t) - (K - 1) + k;
-        if (src >= 0) {
-            acc += float(w[k * C + c]) * float(x[(size_t(b) * T + src) * P + c]);
+    if (int(c0) >= C || int(t) >= T) { return; }
+    for (int e = 0; e < 4; ++e) {
+        const uint c = c0 + e;
+        float acc = 0.0f;
+        for (int k = 0; k < K; ++k) {
+            const int src = int(t) - (K - 1) + k;
+            if (src >= 0) {
+                acc += float(w[k * C + c]) * float(x[(size_t(b) * T + src) * P + c]);
+            }
         }
+        const float s = acc / (1.0f + metal::precise::exp(-acc));
+        y[(size_t(b) * T + t) * C + c] = static_cast<OutT>(s);
     }
-    const float s = acc / (1.0f + metal::precise::exp(-acc));
-    y[(size_t(b) * T + t) * C + c] = static_cast<OutT>(s);
 `
 
 // deltaPrepSource computes the per-(token, head) scalars of the gated delta
@@ -213,9 +217,118 @@ const swigluSource = `
     }
 `
 
+// addNormSource is the residual add plus the next RMSNorm, one threadgroup
+// of 256 threads per token (4 elements each, hidden = 1024):
+//
+//	h = r + float(d)                          (the float32 residual stream)
+//	n = OutT(w * (h * rsqrt(mean(h^2) + eps)))  (the next matmul's input)
+//
+// It replaces a cast, an add, an RMSNorm and a cast (four launches and
+// three round trips through memory) per residual.
+const addNormSource = `
+    const uint lid = thread_position_in_threadgroup.x;
+    const uint row = thread_position_in_grid.y;
+    const size_t base = size_t(row) * Hd + lid * 4;
+    threadgroup float part[8];
+    float hv[4];
+    float ss = 0.0f;
+    for (int e = 0; e < 4; ++e) {
+        hv[e] = r[base + e] + float(d[base + e]);
+        h[base + e] = hv[e];
+        ss += hv[e] * hv[e];
+    }
+    ss = simd_sum(ss);
+    if (thread_index_in_simdgroup == 0) { part[simdgroup_index_in_threadgroup] = ss; }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    float tot = 0.0f;
+    for (int i = 0; i < 8; ++i) { tot += part[i]; }
+    const float inv = metal::precise::rsqrt(tot / float(Hd) + 1e-6f); // rmsEps
+    for (int e = 0; e < 4; ++e) {
+        n[base + e] = static_cast<OutT>(w[lid * 4 + e] * (hv[e] * inv));
+    }
+`
+
+// attnPrepSource lays out full attention's inputs from the fused q|k|v
+// projection [B,T,QW+2*KW] in one pass, one SIMD group per (token, slot),
+// slots being the 8 query heads, then 2 key heads, then 2 value heads:
+//
+//	q, k: per-head RMSNorm (float32, (1+w) folded), rounded to OutT, then
+//	      partial RoPE (first RD of D dims, rotate_half, theta = 1e7) in
+//	      float32 as MLX's fast.rope computes it, rounded to OutT
+//	v:    copied
+//
+// Outputs are [B,heads,T,D], the layout SDPA wants. Lane l owns elements
+// l + 32*e, so RoPE's pair (i, i + RD/2) is in one lane.
+const attnPrepSource = `
+    const uint lane = thread_position_in_grid.x;
+    const uint slot = thread_position_in_grid.y;
+    const uint row = thread_position_in_grid.z;
+    const int T = proj_shape[1];
+    const int PW = proj_shape[2];
+    const uint b = row / T;
+    const uint t = row % T;
+    constexpr int NE = D / 32;
+    const device InT* pr = proj + size_t(row) * PW;
+    if (slot >= HQ + HK) {
+        const uint hv = slot - HQ - HK;
+        const device InT* src = pr + HQ * 2 * D + HK * D + hv * D;
+        device OutT* dst = v + ((size_t(b) * HK + hv) * T + t) * D;
+        for (int e = 0; e < NE; ++e) { dst[lane + 32 * e] = static_cast<OutT>(src[lane + 32 * e]); }
+        return;
+    }
+    const bool isq = slot < HQ;
+    const uint hh = isq ? slot : slot - HQ;
+    const device InT* src = isq ? pr + hh * 2 * D : pr + HQ * 2 * D + hh * D;
+    const device float* w = isq ? qw : kw;
+    float x[NE];
+    float ss = 0.0f;
+    for (int e = 0; e < NE; ++e) {
+        x[e] = float(src[lane + 32 * e]);
+        ss += x[e] * x[e];
+    }
+    const float inv = metal::precise::rsqrt(simd_sum(ss) / float(D) + 1e-6f); // rmsEps
+    for (int e = 0; e < NE; ++e) {
+        const int j = lane + 32 * e;
+        x[e] = float(static_cast<OutT>(w[j] * (x[e] * inv)));
+    }
+    if (int(lane) < RD / 2) {
+        // RoPE pair (lane, lane + RD/2) = (x[0], x[1]) since RD/2 == 32.
+        const float dd = float(lane) / float(RD / 2);
+        const float inv_freq = metal::precise::exp2(-dd * 23.2534966642f); // log2(ropeTheta)
+        const float theta = float(t) * inv_freq;
+        const float c = metal::fast::cos(theta);
+        const float sn = metal::fast::sin(theta);
+        const float x1 = x[0], x2 = x[1];
+        x[0] = x1 * c - x2 * sn;
+        x[1] = x1 * sn + x2 * c;
+    }
+    device OutT* dst = (isq ? q + (size_t(b) * HQ + hh) * T * D : k + (size_t(b) * HK + hh) * T * D) + size_t(t) * D;
+    for (int e = 0; e < NE; ++e) { dst[lane + 32 * e] = static_cast<OutT>(x[e]); }
+`
+
+// attnGateSource multiplies SDPA's output [B,HQ,T,D] by sigmoid(gate), the
+// gate being the second half of each query head's 2*D columns in proj, and
+// writes [B,T,HQ*D] for o_proj. Rounds like the plain ops: sigmoid to OutT,
+// then the product.
+const attnGateSource = `
+    const uint c = thread_position_in_grid.x;
+    const uint row = thread_position_in_grid.y;
+    const int T = proj_shape[1];
+    const int PW = proj_shape[2];
+    const uint b = row / T;
+    const uint t = row % T;
+    const uint hh = c / D;
+    const uint d = c % D;
+    const float g = float(proj[size_t(row) * PW + hh * 2 * D + D + d]);
+    const float sg = float(static_cast<OutT>(vakt_sigmoid(g)));
+    const float ov = float(o[((size_t(b) * HQ + hh) * T + t) * D + d]);
+    out[size_t(row) * HQ * D + c] = static_cast<OutT>(ov * sg);
+`
+
 // kernels are the Metal kernels of the fused path (nil off Metal).
 type kernels struct {
 	conv, prep, delta, norm, swiglu *mlx.Kernel
+	addNorm, attnPrep, attnGate     *mlx.Kernel
 }
 
 func newKernels() *kernels {
@@ -225,6 +338,10 @@ func newKernels() *kernels {
 		delta:  mlx.NewKernel("vakt_gated_delta_cols", []string{"conv", "scal"}, []string{"y"}, gatedDeltaSource, ""),
 		norm:   mlx.NewKernel("vakt_gated_rmsnorm", []string{"core", "proj", "w"}, []string{"out"}, gatedNormSource, kernelHeader),
 		swiglu: mlx.NewKernel("vakt_swiglu", []string{"gu"}, []string{"out"}, swigluSource, kernelHeader),
+
+		addNorm:  mlx.NewKernel("vakt_add_rmsnorm", []string{"r", "d", "w"}, []string{"h", "n"}, addNormSource, ""),
+		attnPrep: mlx.NewKernel("vakt_attn_prep", []string{"proj", "qw", "kw"}, []string{"q", "k", "v"}, attnPrepSource, ""),
+		attnGate: mlx.NewKernel("vakt_attn_gate", []string{"o", "proj"}, []string{"out"}, attnGateSource, kernelHeader),
 	}
 }
 
@@ -237,6 +354,9 @@ func (k *kernels) free() {
 	k.delta.Free()
 	k.norm.Free()
 	k.swiglu.Free()
+	k.addNorm.Free()
+	k.attnPrep.Free()
+	k.attnGate.Free()
 }
 
 // Column offsets of the fused linear-attention projection qkv|z|b|a.
@@ -250,7 +370,7 @@ const (
 func (k *kernels) convSilu(x *mlx.Ctx, proj, taps *mlx.Array, B, T int) *mlx.Array {
 	dt := proj.Dtype()
 	return x.Apply(k.conv, []*mlx.Array{proj, taps}, mlx.KernelLaunch{
-		Grid:           [3]int{linQKVDim, T, B},
+		Grid:           [3]int{linQKVDim / 4, T, B}, // 4 channels per thread
 		ThreadGroup:    [3]int{256, 1, 1},
 		Outputs:        []mlx.KernelOutput{{Shape: []int{B, T, linQKVDim}, Dtype: dt}},
 		TemplateInts:   map[string]int{"K": convKernel, "C": linQKVDim},
@@ -305,6 +425,60 @@ func (k *kernels) swigluOp(x *mlx.Ctx, gu *mlx.Array, B, T int) *mlx.Array {
 		ThreadGroup:    [3]int{256, 1, 1},
 		Outputs:        []mlx.KernelOutput{{Shape: []int{B, T, intermediate}, Dtype: dt}},
 		TemplateInts:   map[string]int{"I": intermediate},
+		TemplateDtypes: map[string]mlx.DType{"OutT": dt},
+	})[0]
+}
+
+// addRMSNorm returns h = r + d (float32) and the RMSNorm of h with scale
+// (1+w folded) in dtype out. r is float32 [B,T,H].
+func (k *kernels) addRMSNorm(x *mlx.Ctx, r, d, scale *mlx.Array, out mlx.DType, B, T int) (*mlx.Array, *mlx.Array) {
+	o := x.Apply(k.addNorm, []*mlx.Array{r, d, scale}, mlx.KernelLaunch{
+		Grid:        [3]int{256, B * T, 1},
+		ThreadGroup: [3]int{256, 1, 1},
+		Outputs: []mlx.KernelOutput{
+			{Shape: []int{B, T, hidden}, Dtype: mlx.Float32},
+			{Shape: []int{B, T, hidden}, Dtype: out},
+		},
+		TemplateInts:   map[string]int{"Hd": hidden},
+		TemplateDtypes: map[string]mlx.DType{"OutT": out},
+	})
+	return o[0], o[1]
+}
+
+// attnPrepOp returns q [B,8,T,256], k and v [B,2,T,256] from the fused q|k|v
+// projection, normed and rotated.
+func (k *kernels) attnPrepOp(x *mlx.Ctx, proj, qw, kw *mlx.Array, B, T int) (q, kk, v *mlx.Array) {
+	dt := proj.Dtype()
+	o := x.Apply(k.attnPrep, []*mlx.Array{proj, qw, kw}, mlx.KernelLaunch{
+		Grid:        [3]int{32, attnHeads + 2*kvHeads, B * T},
+		ThreadGroup: [3]int{32, attnHeads + 2*kvHeads, 1},
+		Outputs: []mlx.KernelOutput{
+			{Shape: []int{B, attnHeads, T, headDim}, Dtype: dt},
+			{Shape: []int{B, kvHeads, T, headDim}, Dtype: dt},
+			{Shape: []int{B, kvHeads, T, headDim}, Dtype: dt},
+		},
+		TemplateInts: map[string]int{
+			"HQ": attnHeads, "HK": kvHeads, "D": headDim, "RD": ropeDims,
+		},
+		TemplateDtypes: map[string]mlx.DType{"InT": dt, "OutT": dt},
+	})
+	return o[0], o[1], o[2]
+}
+
+// attnPrepSource keeps RoPE's pair in one lane only when RD/2 == 32.
+var (
+	_ [ropeDims - 64]struct{}
+	_ [64 - ropeDims]struct{}
+)
+
+// attnGateOp is o * sigmoid(gate) laid out [B,T,8*256] for o_proj.
+func (k *kernels) attnGateOp(x *mlx.Ctx, o, proj *mlx.Array, B, T int) *mlx.Array {
+	dt := proj.Dtype()
+	return x.Apply(k.attnGate, []*mlx.Array{o, proj}, mlx.KernelLaunch{
+		Grid:           [3]int{attnHeads * headDim, B * T, 1},
+		ThreadGroup:    [3]int{256, 1, 1},
+		Outputs:        []mlx.KernelOutput{{Shape: []int{B, T, attnHeads * headDim}, Dtype: dt}},
+		TemplateInts:   map[string]int{"HQ": attnHeads, "D": headDim},
 		TemplateDtypes: map[string]mlx.DType{"OutT": dt},
 	})[0]
 }

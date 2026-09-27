@@ -159,12 +159,18 @@ func open(opts Options) (core.Engine, error) {
 	}, nil
 }
 
-// autoPrecision is the "auto" precision: TF32 matmuls on a GPU (Apple's
-// NAX matmul units and NVIDIA tensor cores; ~1e-3 score drift, and on older
-// Apple GPUs identical to fp32), exact fp32 on CPU, where TF32 does nothing.
+// autoPrecision is the "auto" precision:
+//   - Metal: fp16 matmuls. The release weights are fp16 and M5-class GPU
+//     matmul units run fp16 natively: max|Δs| 1.3e-3 against the PyTorch
+//     reference (bf16: 1.2e-2) and 13% faster than tf32 on an M5 Pro.
+//   - CUDA: TF32 tensor-core matmuls (~1e-3 drift).
+//   - CPU: exact fp32 (TF32 does nothing there).
 func autoPrecision(backend string) string {
-	if backend == "cpu" {
+	switch backend {
+	case "cpu":
 		return "fp32"
+	case "metal":
+		return "fp16"
 	}
 	return "tf32"
 }
