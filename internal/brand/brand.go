@@ -8,7 +8,7 @@ const (
 	ModelRepo = "vaktex/dom-oss-0.8b"
 	// ModelCommit is the Hub commit of the verified launch weights
 	// (model.safetensors sha256 a396d4f4601b8be4...).
-	ModelCommit = "fe1e7a9f728992cb20f0bcc782022ab55898ec11"
+	ModelCommit = "6b2cda79c0b421ede321ea28ea022658c5be5203"
 	ModelName   = "DOM-0.8B"
 	ModelFile   = "model.safetensors"
 )

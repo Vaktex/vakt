@@ -240,7 +240,7 @@ DOM-0.8B scores 0.5731, below the character n-gram baseline at 0.6009. That base
 
 ### Pinned weights
 
-`vakt` downloads [`vaktex/dom-oss-0.8b`](https://huggingface.co/vaktex/dom-oss-0.8b) pinned to commit `fe1e7a9` (`brand.ModelCommit`; `model.safetensors` sha256 `a396d4f4601b...`), so a push to the model repo never changes your scores silently. The Go engine matches the PyTorch model on those weights to 2.6e-6 at fp32 and 1.7e-2 at bf16 (`TestParityRelease`, reference in `testdata/parity/release`).
+`vakt` downloads [`vaktex/dom-oss-0.8b`](https://huggingface.co/vaktex/dom-oss-0.8b) pinned to commit `6b2cda7` (`brand.ModelCommit`; `model.safetensors` sha256 `a396d4f4601b...`), so a push to the model repo never changes your scores silently. The Go engine matches the PyTorch model on those weights to 2.6e-6 at fp32 and 1.7e-2 at bf16 (`TestParityRelease`, reference in `testdata/parity/release`).
 
 <details>
 <summary>Moving to new weights</summary>
