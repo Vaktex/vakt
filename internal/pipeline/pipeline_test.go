@@ -9,7 +9,6 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
-	"time"
 
 	"github.com/vaktex/vakt/internal/core"
 	"github.com/vaktex/vakt/internal/engine"
@@ -302,34 +301,5 @@ func TestBatcherFlushMergesBuckets(t *testing.T) {
 	}
 	if len(b.flush()) != 0 || b.held != 0 {
 		t.Fatal("batcher not empty after flush")
-	}
-}
-
-func TestRunOpeningOverlapsOpen(t *testing.T) {
-	root := sampleTree(t)
-	eng := &countingEngine{budget: 32768, t: t}
-	open := func(context.Context) ([]core.Engine, error) {
-		time.Sleep(200 * time.Millisecond) // a model load
-		return []core.Engine{eng}, nil
-	}
-	prog := &report.Progress{}
-	rep, err := RunOpening(context.Background(), Config{Root: root, Jobs: 2, NoCache: true}, open, newTok(t), prog)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(rep.Units) == 0 {
-		t.Fatal("no units scored")
-	}
-	if prog.FilesParsed.Load() == 0 {
-		t.Fatal("nothing parsed")
-	}
-}
-
-func TestRunOpeningOpenError(t *testing.T) {
-	root := sampleTree(t)
-	boom := errors.New("no model")
-	open := func(context.Context) ([]core.Engine, error) { return nil, boom }
-	if _, err := RunOpening(context.Background(), Config{Root: root, Jobs: 2, NoCache: true}, open, newTok(t), nil); !errors.Is(err, boom) {
-		t.Fatalf("err = %v, want open error", err)
 	}
 }

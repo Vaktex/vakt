@@ -48,24 +48,15 @@ func nativeScan(ctx context.Context, o ScanOptions, prog *report.Progress) (*rep
 			_ = e.Close() // scan result or error already decided
 		}
 	}()
-	// Loading the model and compiling its GPU kernels (on the first batch)
-	// take a second or two: do both while the pipeline walks, parses and
-	// tokenizes, instead of before it starts.
-	open := func(ctx context.Context) ([]core.Engine, error) {
-		for _, d := range devices {
-			e, err := engine.Open(engine.Options{ModelPath: path, ModelSHA: sha, Precision: o.Precision, Device: o.Device, DeviceIndex: d})
-			if err != nil {
-				return nil, err
-			}
-			engines = append(engines, e)
-			if err := warmUp(ctx, e); err != nil {
-				return nil, err
-			}
-			if o.Device == "cpu" || e.Info().Backend != "cuda" {
-				break // one engine per GPU; CPU and Metal have a single device
-			}
+	for _, d := range devices {
+		e, err := engine.Open(engine.Options{ModelPath: path, ModelSHA: sha, Precision: o.Precision, Device: o.Device, DeviceIndex: d})
+		if err != nil {
+			return nil, err
 		}
-		return engines, nil
+		engines = append(engines, e)
+		if o.Device == "cpu" || e.Info().Backend != "cuda" {
+			break // one engine per GPU; CPU and Metal have a single device
+		}
 	}
 
 	rev := o.ModelRevision
@@ -91,18 +82,7 @@ func nativeScan(ctx context.Context, o ScanOptions, prog *report.Progress) (*rep
 		CacheDir:    hub.ScoresDir(),
 		ModelRepo:   repo, ModelRevision: rev, Precision: o.Precision,
 	}
-	return pipeline.RunOpening(ctx, cfg, open, tok, prog)
-}
-
-// warmUp scores one short sequence so the GPU kernels are compiled before
-// the first real batch.
-func warmUp(ctx context.Context, e core.Engine) error {
-	ids := make([]int32, 64)
-	for i := range ids {
-		ids[i] = int32(1000 + i) // #nosec G115 -- small constants
-	}
-	_, err := e.Score(ctx, [][]int32{ids})
-	return err
+	return pipeline.Run(ctx, cfg, engines, tok, prog)
 }
 
 // nativeBench loads the cached model and times one forward pass.
