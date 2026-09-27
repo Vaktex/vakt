@@ -28,6 +28,7 @@ The mRoPE sections reduce to 1D RoPE for text-only input: all three position row
 | `fp32` (default on CPU) | f32 | strict f32 (TF32 off) | max\|Δs\| 3.3e-6, max\|Δp\| 5.6e-6 | ~4.3k tok/s |
 | `tf32` (`auto` on GPU) | f32 | TF32 tensor cores | max\|Δs\| 1.3e-3 | ~7.1k tok/s |
 | `bf16` | bf16 matmul inputs | bf16 | max\|Δs\| 1.0e-2, batch invariance 2.7e-3 | ~9k tok/s |
+| `fp16` | f16 matmul inputs | f16 (native on M5-class matmul units) | release weights are fp16; bound 2e-2 in `TestParityRelease` | not yet measured |
 
 In every mode the residual stream, norms, the DeltaNet state, pooling and the heads run in f32. The bf16 checkpoint layout (bf16 backbone, f32 heads) loads in every mode.
 
@@ -40,7 +41,8 @@ MLX turns on TF32 for f32 GPU matmuls by default (`MLX_ENABLE_TF32=1`). `mlx.Ini
 On Metal the whole DeltaNet mixer between `in_proj` and `out_proj` is three kernels that read their columns of the fused projection in place, and the MLP activation is one more. The plain-ops path made ~20 full passes over `[B·T, 2048..6144]` tensors per layer (splits, casts, l2norms, sigmoids, reshape copies), which left the layer memory-bound once the matmuls got fast.
 
 - `convSilu`: causal depthwise conv plus SiLU in one pass, reading the q|k|v columns of the projection. MLX's general `conv1d` was about 10× slower here.
-- `gatedDelta`: the gated delta recurrence with its prologue fused in (l2norm and scaling of q/k, β = σ(b), g = −exp(A_log) · softplus(a + dt_bias)). It uses one SIMD group per (batch, head, value column) and keeps the state in registers. It follows the design of mlx-lm's `gated_delta` kernel (MIT) and matches `torch_recurrent_gated_delta_rule` in f32.
+- `deltaPrep`: the per-(token, head) scalars of the recurrence, computed once: the l2norm factors of q and k, β = σ(b) and the decay exp(g), g = −exp(A_log) · softplus(a + dt_bias).
+- `gatedDelta`: the gated delta recurrence. One SIMD group carries 4 value columns of one (batch, head) with the state in registers, so each token's q and k are loaded once per 4 columns. (Computing the prologue inside every column's SIMD group made this the top stage in `VAKT_PROFILE`: 27% of forward time on an M5 Pro.) It follows the design of mlx-lm's `gated_delta` kernel (MIT) and matches `torch_recurrent_gated_delta_rule` in f32.
 - `gatedNorm`: RMSNormGated · SiLU(z) and the cast for `out_proj`, one SIMD group per (token, head).
 - `swiglu`: SiLU(gate) · up over the fused gate|up projection.
 

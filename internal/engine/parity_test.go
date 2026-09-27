@@ -497,7 +497,7 @@ func TestParityRelease(t *testing.T) {
 	for _, tc := range []struct {
 		prec string
 		tol  float64
-	}{{"fp32", 1e-4}, {"bf16", 2e-2}} {
+	}{{"fp32", 1e-4}, {"bf16", 2e-2}, {"fp16", 2e-2}} {
 		e, err := Open(Options{ModelPath: p, Precision: tc.prec, Device: testDevice()})
 		if err != nil {
 			t.Fatal(err)

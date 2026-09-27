@@ -40,9 +40,9 @@ func open(opts Options) (core.Engine, error) {
 		prec = "fp32"
 	}
 	switch prec {
-	case "fp32", "tf32", "bf16", "auto":
+	case "fp32", "tf32", "bf16", "fp16", "auto":
 	default:
-		return nil, fmt.Errorf("engine: precision must be auto, fp32, tf32 or bf16, got %q", prec)
+		return nil, fmt.Errorf("engine: precision must be auto, fp32, tf32, bf16 or fp16, got %q", prec)
 	}
 
 	// 1. The file is untrusted: validate its header before MLX parses it.
@@ -129,8 +129,14 @@ func open(opts Options) (core.Engine, error) {
 		return nil, err
 	}
 	compute := mlx.Float32
-	if prec == "bf16" {
+	switch prec {
+	case "bf16":
 		compute = mlx.BFloat16
+	case "fp16":
+		// IEEE half: the format Apple's GPU matmul units (M5 and later)
+		// run natively. Same layout as bf16 (f32 residual, norms, state,
+		// pool and heads) but a narrower range, so check parity first.
+		compute = mlx.Float16
 	}
 	w, err := loadWeights(x, raw, prefix, compute, heads)
 	if err != nil {

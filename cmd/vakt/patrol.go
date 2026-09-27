@@ -73,7 +73,7 @@ type ScanOptions struct {
 	ModelPath     string // a local model.safetensors
 	ModelRepo     string // Hugging Face repo id, e.g. vaktex/dom-oss-0.8b
 	ModelRevision string // branch, tag or commit (default "main")
-	Precision     string // "auto", "fp32", "tf32" or "bf16"
+	Precision     string // "auto", "fp32", "tf32", "bf16" or "fp16"
 	Device        string // "auto", "gpu" or "cpu"
 	Devices       []int  // GPU indices; empty means the engine's default
 
@@ -131,7 +131,7 @@ func newPatrolCmd() *cobra.Command {
 	f.BoolVar(&o.NoCache, "no-cache", false, "don't read or write the score cache")
 	f.StringVar(&o.Model, "model", defaultModel, "a local model.safetensors path, or hf:owner/name[@revision]")
 	f.StringVar(&o.ModelRevision, "revision", "", "model revision (overrides @revision in --model)")
-	f.StringVar(&o.Precision, "precision", defaultPrecision, "compute precision: auto (tf32 on GPU, fp32 on CPU), fp32 (exact), tf32 (~1.7x faster on GPU) or bf16 (~2x faster)")
+	f.StringVar(&o.Precision, "precision", defaultPrecision, "compute precision: auto (tf32 on GPU, fp32 on CPU), fp32 (exact), tf32 (~1.7x faster on GPU) bf16 or fp16 (~2x faster; fp16 is native on M5-class GPUs)")
 	f.StringVar(&o.Device, "device", "auto", "device: auto, gpu or cpu")
 	f.StringVar(&devices, "devices", "", "comma-separated GPU indices to use (e.g. 0,1)")
 	f.Int64Var(&o.MaxFileBytes, "max-file-bytes", defaultMaxFileBytes, "skip files larger than this")
@@ -181,9 +181,9 @@ func (o *ScanOptions) finish(devices string, outSet, revisionSet bool) error {
 		return errors.New("--max-file-bytes must be positive")
 	}
 	switch o.Precision {
-	case "auto", "fp32", "tf32", "bf16":
+	case "auto", "fp32", "tf32", "bf16", "fp16":
 	default:
-		return fmt.Errorf("--precision must be auto, fp32, tf32 or bf16 (got %q)", o.Precision)
+		return fmt.Errorf("--precision must be auto, fp32, tf32, bf16 or fp16 (got %q)", o.Precision)
 	}
 	switch o.Device {
 	case "auto", "gpu", "cpu":

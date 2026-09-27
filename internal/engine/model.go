@@ -405,7 +405,8 @@ func (m *model) linearAttention(x *mlx.Ctx, h, mask *mlx.Array, L layerW, length
 	if m.delta == deltaKernel && m.kern != nil {
 		// Metal: three fused kernels read their columns of proj in place.
 		conv := m.prof.mark(x, "lin.conv", m.kern.convSilu(x, proj, L.convTapsKC, B, T))
-		core := m.prof.mark(x, "lin.delta", m.kern.gatedDelta(x, conv, proj, L, B, T))
+		scal := m.prof.mark(x, "lin.delta_prep", m.kern.deltaPrep(x, conv, proj, L, B, T))
+		core := m.prof.mark(x, "lin.delta", m.kern.gatedDelta(x, conv, scal, B, T))
 		o := m.prof.mark(x, "lin.gated_norm", m.kern.gatedNorm(x, core, proj, L.gnorm, h.Dtype(), B, T))
 		return m.prof.mark(x, "lin.out_proj", x.Matmul(o, L.outProj))
 	}

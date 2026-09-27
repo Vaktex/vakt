@@ -162,7 +162,7 @@ jobs:
 
 | Option | Meaning |
 |---|---|
-| `--precision auto\|fp32\|tf32\|bf16` | `auto` (default) is `tf32` on a GPU and `fp32` on CPU; `fp32` is exact; `tf32` (~1.7x faster on GPUs with matmul units: Apple M5-class, NVIDIA) and `bf16` (~2x) trade a little precision (~1e-3 and ~1e-2) for speed |
+| `--precision auto\|fp32\|tf32\|bf16\|fp16` | `auto` (default) is `tf32` on a GPU and `fp32` on CPU; `fp32` is exact; `tf32` (~1.7x faster on GPUs with matmul units: Apple M5-class, NVIDIA) `bf16` and `fp16` (~2x; fp16 is native on M5-class GPUs) trade a little precision (~1e-3, ~1e-2) for speed |
 | `--include`, `--exclude` | doublestar globs, repeatable |
 | `--top-level` | also score code outside functions (imports, globals); these fragments score less reliably |
 | `--no-repo-ignores` | ignore the scanned tree's `.gitignore`/`.vaktignore` |
