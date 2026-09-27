@@ -62,3 +62,11 @@ On Metal the whole DeltaNet mixer between `in_proj` and `out_proj` is three kern
 ## Loading
 
 `Open` validates the safetensors header before MLX parses the file (see docs/SECURITY-DESIGN.md). The model sha256 comes from `Options.ModelSHA` (hub), or is computed if missing.
+
+## Profiling
+
+`VAKT_PROFILE=1` makes each forward stage (matmuls, the DeltaNet kernels, attention, norms, residual adds, pooling) evaluate on its own and charges its wall time to that stage; the breakdown is printed to stderr when the engine closes. Stages run serialised, so a profiled scan is slower than a normal one, but the shares show where the time goes:
+
+```sh
+VAKT_PROFILE=1 ./bin/vakt . --no-cache -q
+```

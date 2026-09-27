@@ -11,6 +11,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/vaktex/vakt/internal/brand"
 	"github.com/vaktex/vakt/internal/core"
@@ -136,7 +137,7 @@ func open(opts Options) (core.Engine, error) {
 		s.Free()
 		return nil, err
 	}
-	m := &model{w: w, delta: deltaChunkMode, evalEvery: evalEveryFromEnv(1)}
+	m := &model{w: w, delta: deltaChunkMode, evalEvery: evalEveryFromEnv(1), prof: newProfilerFromEnv()}
 	switch os.Getenv("VAKT_DELTANET") {
 	case "scan":
 		m.delta = deltaScan
@@ -168,6 +169,7 @@ func (e *mlxEngine) MaxBatchTokens() int { return e.maxBT }
 
 func (e *mlxEngine) Close() error {
 	if e.m != nil {
+		e.m.prof.report(os.Stderr, e.info.Backend+" "+e.info.Device+" "+e.info.Precision)
 		e.m.w.free()
 		e.m.kern.free()
 		e.m = nil
@@ -234,6 +236,13 @@ func (e *mlxEngine) Score(ctx context.Context, batch [][]int32) ([]core.Scores, 
 	ids := x.FromInt32(flat, B, T)
 	mask3 := x.FromBool(maskv, B, T, 1)
 
+	if e.m.prof != nil {
+		began, real := time.Now(), 0
+		for _, ids := range batch {
+			real += len(ids)
+		}
+		defer func() { e.m.prof.batch(real, B*T, time.Since(began)) }()
+	}
 	e.m.cancelled = func() bool { return ctx.Err() != nil }
 	defer func() { e.m.cancelled = nil }()
 	hidden := e.m.forward(x, ids, mask3, lengths, B, T) // [B, T, H] f32
@@ -251,6 +260,7 @@ func (e *mlxEngine) Score(ctx context.Context, batch [][]int32) ([]core.Scores, 
 	if err := x.Eval(sev, fam); err != nil {
 		return nil, err
 	}
+	e.m.prof.mark(x, "pool+heads", fam)
 	sv, err := x.Float32s(sev)
 	if err != nil {
 		return nil, err

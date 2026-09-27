@@ -259,8 +259,9 @@ type model struct {
 	w         *weights
 	cancelled func() bool // checked between layers
 	delta     deltaMode
-	kern      *kernels // fused Metal kernels (nil off Metal)
-	evalEvery int      // materialise the residual every N layers (0 = one graph)
+	kern      *kernels  // fused Metal kernels (nil off Metal)
+	evalEvery int       // materialise the residual every N layers (0 = one graph)
+	prof      *profiler // per-stage timing (VAKT_PROFILE=1), nil otherwise
 }
 
 // forward returns the float32 last hidden state after the final norm,
@@ -275,8 +276,9 @@ func (m *model) forward(x *mlx.Ctx, ids *mlx.Array, mask *mlx.Array, lengths []i
 	w := m.w
 	// The residual stream is carried in float32 in every precision mode
 	// (as HF does under autocast); only matmul inputs use the compute dtype.
-	h := x.AsType(x.Take(w.embed, ids, 0), mlx.Float32) // [B, T, H], owned by x
-	lx := mlx.NewCtx(x.S)                               // per-segment scratch
+	m.prof.start()
+	h := m.prof.mark(x, "embed", x.AsType(x.Take(w.embed, ids, 0), mlx.Float32)) // [B, T, H], owned by x
+	lx := mlx.NewCtx(x.S)                                                        // per-segment scratch
 	defer lx.Free()
 	for i, L := range w.layers {
 		if m.cancelled != nil && m.cancelled() {
@@ -284,17 +286,17 @@ func (m *model) forward(x *mlx.Ctx, ids *mlx.Array, mask *mlx.Array, lengths []i
 			return x.Zeros(mlx.Float32, B, T, hidden)
 		}
 		r := h
-		n := m.rmsNorm(lx, h, L.inNorm)
+		n := m.prof.mark(lx, "norm", m.rmsNorm(lx, h, L.inNorm))
 		var mixed *mlx.Array
 		if isFull(i) {
 			mixed = m.attention(lx, n, L, B, T)
 		} else {
 			mixed = m.linearAttention(lx, n, mask, L, lengths, B, T)
 		}
-		h = lx.Add(r, lx.AsType(mixed, mlx.Float32))
+		h = m.prof.mark(lx, "residual", lx.Add(r, lx.AsType(mixed, mlx.Float32)))
 		r = h
-		n = m.rmsNorm(lx, h, L.postNorm)
-		h = lx.Add(r, lx.AsType(m.mlp(lx, n, L, B, T), mlx.Float32))
+		n = m.prof.mark(lx, "norm", m.rmsNorm(lx, h, L.postNorm))
+		h = m.prof.mark(lx, "residual", lx.Add(r, lx.AsType(m.mlp(lx, n, L, B, T), mlx.Float32)))
 		if m.evalEvery > 0 && (i+1)%m.evalEvery == 0 {
 			if err := lx.Eval(h); err != nil {
 				x.Fail(err)
@@ -309,7 +311,7 @@ func (m *model) forward(x *mlx.Ctx, ids *mlx.Array, mask *mlx.Array, lengths []i
 	if err := lx.Err(); err != nil {
 		x.Fail(err)
 	}
-	out := m.rmsNorm(lx, h, w.norm)
+	out := m.prof.mark(lx, "norm", m.rmsNorm(lx, h, w.norm))
 	if err := lx.Eval(out); err != nil {
 		x.Fail(err)
 		return x.Zeros(mlx.Float32, B, T, hidden)
@@ -326,9 +328,10 @@ func (m *model) rmsNorm(x *mlx.Ctx, h, scale *mlx.Array) *mlx.Array {
 }
 
 func (m *model) mlp(x *mlx.Ctx, h *mlx.Array, L layerW, B, T int) *mlx.Array {
-	gu := x.Matmul(h, L.gateUp) // [B, T, 2I]
+	gu := m.prof.mark(x, "mlp.gate_up", x.Matmul(h, L.gateUp)) // [B, T, 2I]
 	if m.kern != nil {
-		return x.Matmul(m.kern.swigluOp(x, gu, B, T), L.down)
+		a := m.prof.mark(x, "mlp.act", m.kern.swigluOp(x, gu, B, T))
+		return m.prof.mark(x, "mlp.down", x.Matmul(a, L.down))
 	}
 	parts := x.SplitAt(gu, -1, intermediate)
 	return x.Matmul(x.Multiply(x.Silu(parts[0]), parts[1]), L.down)
@@ -337,7 +340,7 @@ func (m *model) mlp(x *mlx.Ctx, h *mlx.Array, L layerW, B, T int) *mlx.Array {
 // attention is gated attention: sigmoid-gated output, q/k RMSNorm per head, partial
 // RoPE (first 64 of 256 dims, rotate_half), GQA, causal.
 func (m *model) attention(x *mlx.Ctx, h *mlx.Array, L layerW, B, T int) *mlx.Array {
-	proj := x.Matmul(h, L.qkv) // [B, T, 4096+512+512]
+	proj := m.prof.mark(x, "attn.qkv", x.Matmul(h, L.qkv)) // [B, T, 4096+512+512]
 	p := x.SplitAt(proj, -1, attnHeads*headDim*2, attnHeads*headDim*2+kvHeads*headDim)
 	// q_proj output is viewed as [.., heads, 2*head_dim] then chunked: the
 	// first head_dim of each head is the query, the second is the gate.
@@ -355,12 +358,14 @@ func (m *model) attention(x *mlx.Ctx, h *mlx.Array, L layerW, B, T int) *mlx.Arr
 	v = x.Transpose(v, 0, 2, 1, 3)
 	q = x.RoPE(q, ropeDims, false, ropeTheta, 1, 0)
 	k = x.RoPE(k, ropeDims, false, ropeTheta, 1, 0)
+	m.prof.mark(x, "attn.norm_rope", q)
+	m.prof.mark(x, "attn.norm_rope", k)
 
 	// Right padding + causal mask: real queries never see padded keys.
-	o := blockedCausalSDPA(x, q, k, v, float32(1/math.Sqrt(headDim)), B, T)
+	o := m.prof.mark(x, "attn.sdpa", blockedCausalSDPA(x, q, k, v, float32(1/math.Sqrt(headDim)), B, T))
 	o = x.Reshape(x.Transpose(o, 0, 2, 1, 3), B, T, attnHeads*headDim)
-	o = x.Multiply(o, x.Sigmoid(gate))
-	return x.Matmul(o, L.o)
+	o = m.prof.mark(x, "attn.gate", x.Multiply(o, x.Sigmoid(gate)))
+	return m.prof.mark(x, "attn.o", x.Matmul(o, L.o))
 }
 
 // attnBlock bounds the query block of full attention. MLX 0.31.1 has no fused
@@ -396,12 +401,13 @@ func blockedCausalSDPA(x *mlx.Ctx, q, k, v *mlx.Array, scale float32, B, T int) 
 func (m *model) linearAttention(x *mlx.Ctx, h, mask *mlx.Array, L layerW, lengths []int, B, T int) *mlx.Array {
 	// apply_mask_to_padding_states: zero padded positions first.
 	h = x.Multiply(h, x.AsType(mask, h.Dtype()))
-	proj := x.Matmul(h, L.inProj) // [B, T, 6144+2048+16+16]
+	proj := m.prof.mark(x, "lin.in_proj", x.Matmul(h, L.inProj)) // [B, T, 6144+2048+16+16]
 	if m.delta == deltaKernel && m.kern != nil {
 		// Metal: three fused kernels read their columns of proj in place.
-		conv := m.kern.convSilu(x, proj, L.convTapsKC, B, T)
-		core := m.kern.gatedDelta(x, conv, proj, L, B, T)
-		return x.Matmul(m.kern.gatedNorm(x, core, proj, L.gnorm, h.Dtype(), B, T), L.outProj)
+		conv := m.prof.mark(x, "lin.conv", m.kern.convSilu(x, proj, L.convTapsKC, B, T))
+		core := m.prof.mark(x, "lin.delta", m.kern.gatedDelta(x, conv, proj, L, B, T))
+		o := m.prof.mark(x, "lin.gated_norm", m.kern.gatedNorm(x, core, proj, L.gnorm, h.Dtype(), B, T))
+		return m.prof.mark(x, "lin.out_proj", x.Matmul(o, L.outProj))
 	}
 	p := x.SplitAt(proj, -1, linQKVDim, linQKVDim+linValueWidth, linQKVDim+linValueWidth+linHeads)
 	mixed, z, bb, aa := p[0], p[1], p[2], p[3]
