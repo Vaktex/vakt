@@ -9,6 +9,7 @@ package mlx
 import "C"
 
 import (
+	"sync"
 	"unsafe"
 )
 
@@ -28,9 +29,10 @@ func (x *Ctx) LoadSafetensors(path string) (map[string]*Array, error) {
 	defer C.mlx_map_string_to_array_free(m)
 	meta := C.mlx_map_string_to_string_new()
 	defer C.mlx_map_string_to_string_free(meta)
-	cpu := C.mlx_default_cpu_stream_new()
-	defer C.mlx_stream_free(cpu)
-	if !x.check("load_safetensors", C.mlx_load_safetensors(&m, &meta, cp, cpu)) {
+	// The Load primitives run when the arrays are first evaluated, possibly
+	// on another OS thread, so they need a stream usable from any thread.
+	loadStreamOnce.Do(func() { loadStream = CPU() })
+	if !x.check("load_safetensors", C.mlx_load_safetensors(&m, &meta, cp, loadStream.c)) {
 		return nil, x.err
 	}
 	out := map[string]*Array{}
@@ -47,3 +49,9 @@ func (x *Ctx) LoadSafetensors(path string) (map[string]*Array, error) {
 	}
 	return out, nil
 }
+
+// loadStream is the CPU stream every file load runs on (never freed).
+var (
+	loadStream     *Stream
+	loadStreamOnce sync.Once
+)

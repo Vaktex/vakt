@@ -325,10 +325,69 @@ const attnGateSource = `
     out[size_t(row) * HQ * D + c] = static_cast<OutT>(ov * sg);
 `
 
+// convPrepSource is the causal depthwise conv + SiLU fused with the gated
+// delta rule's per-token prologue, feeding MLX's chunked gated_delta_update.
+// One SIMD group per (token, head); each lane owns 4 channels of that head's
+// q, k and v. The conv output is rounded to CT (the compute dtype) exactly
+// where the plain-ops path rounds it, then:
+//
+//	qn = l2norm(q) / sqrt(Dk), kn = l2norm(k), vv = v       float32 [B,T,H,D]
+//	beta = sigmoid(b), g = exp(-exp(A_log) * softplus(a + dt_bias))
+//	                                                        float32 [B,T,H]
+//
+// Everything is float32 because MLX's kernel reads the decay in its input
+// dtype and takes its log: a decay near 1 in fp16 is off by up to 2.4e-4 per
+// token, which compounds over a long memory.
+const convPrepSource = `
+    const uint lane = thread_position_in_grid.x;
+    const uint h = thread_position_in_grid.y;
+    const uint row = thread_position_in_grid.z;
+    const int T = x_shape[1];
+    const int P = x_shape[2];
+    const int t = int(row % uint(T));
+    constexpr int NP = D / 32;
+    constexpr int C = 3 * H * D;
+    float r[3][NP];
+    for (int seg = 0; seg < 3; ++seg) {
+        for (int e = 0; e < NP; ++e) {
+            const int ch = seg * H * D + h * D + lane * NP + e;
+            float acc = 0.0f;
+            for (int k = 0; k < K; ++k) {
+                const int src = t - (K - 1) + k;
+                if (src >= 0) {
+                    acc += float(w[k * C + ch]) * float(x[(size_t(row) - (K - 1) + k) * P + ch]);
+                }
+            }
+            const float sv = acc / (1.0f + metal::precise::exp(-acc));
+            r[seg][e] = float(static_cast<CT>(sv));
+        }
+    }
+    float qss = 0.0f, kss = 0.0f;
+    for (int e = 0; e < NP; ++e) {
+        qss += r[0][e] * r[0][e];
+        kss += r[1][e] * r[1][e];
+    }
+    const float qinv = metal::precise::rsqrt(simd_sum(qss) + 1e-6f);
+    const float kinv = metal::precise::rsqrt(simd_sum(kss) + 1e-6f);
+    const float qscale = metal::precise::rsqrt(float(D));
+    const size_t o = (size_t(row) * H + h) * D + lane * NP;
+    for (int e = 0; e < NP; ++e) {
+        qn[o + e] = (r[0][e] * qinv) * qscale;
+        kn[o + e] = r[1][e] * kinv;
+        vv[o + e] = r[2][e];
+    }
+    if (lane == 0) {
+        const device ProjT* pr = x + size_t(row) * P;
+        beta[size_t(row) * H + h] = vakt_sigmoid(float(pr[BOFF + h]));
+        g[size_t(row) * H + h] = metal::precise::exp(aneg[h] * vakt_softplus(float(pr[BOFF + H + h]) + dtbias[h]));
+    }
+`
+
 // kernels are the Metal kernels of the fused path (nil off Metal).
 type kernels struct {
 	conv, prep, delta, norm, swiglu *mlx.Kernel
 	addNorm, attnPrep, attnGate     *mlx.Kernel
+	convPrep                        *mlx.Kernel
 }
 
 func newKernels() *kernels {
@@ -342,6 +401,7 @@ func newKernels() *kernels {
 		addNorm:  mlx.NewKernel("vakt_add_rmsnorm", []string{"r", "d", "w"}, []string{"h", "n"}, addNormSource, ""),
 		attnPrep: mlx.NewKernel("vakt_attn_prep", []string{"proj", "qw", "kw"}, []string{"q", "k", "v"}, attnPrepSource, ""),
 		attnGate: mlx.NewKernel("vakt_attn_gate", []string{"o", "proj"}, []string{"out"}, attnGateSource, kernelHeader),
+		convPrep: mlx.NewKernel("vakt_conv_delta_prep", []string{"x", "w", "aneg", "dtbias"}, []string{"qn", "kn", "vv", "g", "beta"}, convPrepSource, kernelHeader),
 	}
 }
 
@@ -357,6 +417,7 @@ func (k *kernels) free() {
 	k.addNorm.Free()
 	k.attnPrep.Free()
 	k.attnGate.Free()
+	k.convPrep.Free()
 }
 
 // Column offsets of the fused linear-attention projection qkv|z|b|a.
@@ -482,3 +543,26 @@ func (k *kernels) attnGateOp(x *mlx.Ctx, o, proj *mlx.Array, B, T int) *mlx.Arra
 		TemplateDtypes: map[string]mlx.DType{"OutT": dt},
 	})[0]
 }
+
+// convDeltaPrep runs the conv + SiLU and the gated-delta prologue over proj
+// [B,T,P]: q, k (normalised, q scaled), v [B,T,16,128] and the decays and
+// betas [B,T,16], all float32, ready for MLX's gated_delta_update.
+func (k *kernels) convDeltaPrep(x *mlx.Ctx, proj *mlx.Array, L layerW, B, T int) (q, kk, v, g, beta *mlx.Array) {
+	o := x.Apply(k.convPrep, []*mlx.Array{proj, L.convTapsKC, L.aLogNeg, L.dtBias}, mlx.KernelLaunch{
+		Grid:        [3]int{32, linHeads, B * T},
+		ThreadGroup: [3]int{32, linHeads, 1},
+		Outputs: []mlx.KernelOutput{
+			{Shape: []int{B, T, linHeads, linKeyDim}, Dtype: mlx.Float32},
+			{Shape: []int{B, T, linHeads, linKeyDim}, Dtype: mlx.Float32},
+			{Shape: []int{B, T, linHeads, linValDim}, Dtype: mlx.Float32},
+			{Shape: []int{B, T, linHeads}, Dtype: mlx.Float32},
+			{Shape: []int{B, T, linHeads}, Dtype: mlx.Float32},
+		},
+		TemplateInts:   map[string]int{"H": linHeads, "D": linKeyDim, "K": convKernel, "BOFF": projBOff},
+		TemplateDtypes: map[string]mlx.DType{"CT": proj.Dtype(), "ProjT": proj.Dtype()},
+	})
+	return o[0], o[1], o[2], o[3], o[4]
+}
+
+// convPrepSource indexes q, k and v heads with one D.
+var _ [linKeyDim - linValDim]struct{}
