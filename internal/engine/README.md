@@ -43,7 +43,7 @@ On Metal the whole DeltaNet mixer between `in_proj` and `out_proj` is three kern
 On Metal the default DeltaNet path is:
 
 - `convDeltaPrep`: causal depthwise conv + SiLU fused with the recurrence's per-token prologue. One SIMD group per (token, head) reads the q, k and v channels of the projection, rounds the conv output to the compute dtype where the plain path does, and writes l2-normalised (and, for q, scaled) q and k, v, the decay exp(g) and β = σ(b), all float32. The decay stays float32 because MLX's kernel reads it in its input dtype and takes its log; a decay near 1 in fp16 is off by up to 2.4e-4 per token, which compounds over a long memory.
-- MLX's `fast.gated_delta_update` (ml-explore/mlx#4020): the chunk-parallel (WY) form of the gated delta rule. vakt defaults `GATED_DELTA_CHUNK=8`, the precompiled simdgroup-matrix variant: MLX's 16-token NAX variant multiplies float32 tiles through Metal Performance Primitives, which macOS 26.x refuses to compile (`GATED_DELTA_CHUNK=16` opts back in). `Open` runs the kernel once on a tiny input and falls back to `VAKT_DELTANET=kernel` with a note on stderr if it does not build. mlx-c does not wrap it yet, so `third_party/mlx/patches/mlxc-gated-delta.patch` adds `mlx_fast_gated_delta_update`.
+- MLX's `fast.gated_delta_update` (ml-explore/mlx#4020): the chunk-parallel (WY) form of the gated delta rule, 16-token chunks on the matmul units of M5-class GPUs and 8-token simdgroup-matrix chunks elsewhere. mlx-c does not wrap it yet, so `third_party/mlx/patches/mlxc-gated-delta.patch` adds `mlx_fast_gated_delta_update`.
 
 `VAKT_DELTANET=kernel` selects vakt's own recurrence kernels instead (kept for comparison):
 

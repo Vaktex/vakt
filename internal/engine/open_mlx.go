@@ -154,21 +154,6 @@ func open(opts Options) (core.Engine, error) {
 		switch os.Getenv("VAKT_DELTANET") {
 		case "":
 			m.delta, m.kern = deltaMLX, newKernels()
-			// MLX's 16-token NAX variant multiplies float32 tiles through
-			// Metal Performance Primitives, which macOS 26.x rejects at
-			// kernel compile time ("no matching member function for call to
-			// get_destination_cooperative_tensor"). The 8-token
-			// simdgroup-matrix variant is precompiled and works everywhere.
-			// GATED_DELTA_CHUNK=16 opts back in.
-			if os.Getenv("GATED_DELTA_CHUNK") == "" {
-				_ = os.Setenv("GATED_DELTA_CHUNK", "8")
-			}
-			if err := probeGatedDelta(s); err != nil {
-				// Never fail a scan over it: vakt's own recurrence
-				// kernels compute the same thing.
-				fmt.Fprintf(os.Stderr, "%s: MLX gated-delta kernel unavailable (%v); using vakt's own\n", brand.Binary, firstLine(err))
-				m.delta = deltaKernel
-			}
 		case "kernel":
 			m.delta, m.kern = deltaKernel, newKernels()
 		}
@@ -177,34 +162,6 @@ func open(opts Options) (core.Engine, error) {
 		s: s, m: m, maxBT: maxBatchTokens(backend),
 		info: core.EngineInfo{Backend: backend, Device: device, Precision: prec, ModelSHA: strings.ToLower(sha)},
 	}, nil
-}
-
-// probeGatedDelta runs MLX's gated_delta_update once on a tiny input (long
-// enough for the chunked path), so a kernel that does not compile on this
-// OS is found at Open rather than in the middle of a scan.
-func probeGatedDelta(s *mlx.Stream) error {
-	runtime.LockOSThread()
-	defer runtime.UnlockOSThread()
-	x := mlx.NewCtx(s)
-	defer x.Free()
-	const T = 32
-	qk := x.Add(x.Zeros(mlx.Float32, 1, T, linHeads, linKeyDim), x.Scalar(0.05))
-	v := x.Add(x.Zeros(mlx.Float32, 1, T, linHeads, linValDim), x.Scalar(0.5))
-	g := x.Add(x.Zeros(mlx.Float32, 1, T, linHeads), x.Scalar(0.9))
-	beta := x.Add(x.Zeros(mlx.Float32, 1, T, linHeads), x.Scalar(0.5))
-	out := x.GatedDeltaUpdate(qk, qk, v, g, beta)
-	if err := x.Eval(out); err != nil {
-		return err
-	}
-	return x.Err()
-}
-
-func firstLine(err error) string {
-	msg := err.Error()
-	if i := strings.IndexByte(msg, '\n'); i >= 0 {
-		msg = msg[:i]
-	}
-	return msg
 }
 
 // autoPrecision is the "auto" precision:
