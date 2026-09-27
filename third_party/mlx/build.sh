@@ -248,7 +248,8 @@ cuda)
 esac
 
 # 1) MLX
-cmake -S "$src/mlx" -B "$build/mlx" "${opts[@]}"
+cmake -S "$src/mlx" -B "$build/mlx" "${opts[@]}" 2>&1 | tee "$build/mlx-configure.log"
+[[ "${PIPESTATUS[0]}" == 0 ]] || exit 1
 cmake --build "$build/mlx" -j "$jobs"
 cmake --install "$build/mlx"
 
@@ -292,3 +293,9 @@ if [[ "$backend" == metal ]]; then
 fi
 
 echo "installed $target -> $prefix"
+if [[ "$backend" == metal ]] && grep -q "Building without NAX kernels" "$build/mlx-configure.log"; then
+	echo >&2
+	echo "WARNING: MLX was built WITHOUT the M5-class matmul-unit (NAX) kernels." >&2
+	echo "         They need Xcode with the macOS 26.2 SDK or newer (xcrun -sdk macosx --show-sdk-version: $(xcrun -sdk macosx --show-sdk-version 2>/dev/null))." >&2
+	echo "         The binary works, but matmuls, attention and the DeltaNet recurrence run slower on M5-class GPUs." >&2
+fi
