@@ -1,8 +1,8 @@
 diff --git a/mlx/backend/metal/CMakeLists.txt b/mlx/backend/metal/CMakeLists.txt
-index c86cfde..a23005b 100644
+index 67c6957..8e95a40 100644
 --- a/mlx/backend/metal/CMakeLists.txt
 +++ b/mlx/backend/metal/CMakeLists.txt
-@@ -159,5 +159,6 @@ endif()
+@@ -141,5 +141,6 @@ endif()
  
  add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/kernels)
  
@@ -12,7 +12,7 @@ index c86cfde..a23005b 100644
 +# metallib is registered at runtime (see device.cpp).
 +target_compile_definitions(mlx PRIVATE METAL_PATH="mlx.metallib")
 diff --git a/mlx/backend/metal/device.cpp b/mlx/backend/metal/device.cpp
-index 2f25f89..dd70bcf 100644
+index 15824d6..fa5c8f3 100644
 --- a/mlx/backend/metal/device.cpp
 +++ b/mlx/backend/metal/device.cpp
 @@ -1,6 +1,7 @@
@@ -22,8 +22,8 @@ index 2f25f89..dd70bcf 100644
 +#include <dispatch/dispatch.h>
  #include <sstream>
  
- #include <fmt/format.h>
-@@ -146,6 +147,28 @@ MTL::Library* try_load_framework(
+ #define NS_PRIVATE_IMPLEMENTATION
+@@ -87,6 +88,28 @@ MTL::Library* try_load_framework(
  }
  #endif
  
@@ -52,10 +52,10 @@ index 2f25f89..dd70bcf 100644
  // Firstly, search for the metallib in the same path as this binary
  std::pair<MTL::Library*, NS::Error*> load_colocated_library(
      MTL::Device* device,
-@@ -193,6 +216,19 @@ std::pair<MTL::Library*, NS::Error*> load_swiftpm_library(
- }
- 
+@@ -136,6 +159,19 @@ std::pair<MTL::Library*, NS::Error*> load_swiftpm_library(
  MTL::Library* load_default_library(MTL::Device* device) {
+   NS::Error* error[5];
+   MTL::Library* lib;
 +  // vakt: bytes registered by the host program win.
 +  {
 +    auto [elib, eerr] = load_embedded_library(device);
@@ -69,10 +69,10 @@ index 2f25f89..dd70bcf 100644
 +      throw std::runtime_error(msg.str());
 +    }
 +  }
-   // Check override path before automatic lookup
-   if (!get_metallib_path().empty()) {
-     auto [lib, error] =
-@@ -966,3 +1002,10 @@ bool is_nax_available() {
+   // First try the colocated mlx.metallib
+   std::tie(lib, error[0]) = load_colocated_library(device, "mlx");
+   if (lib) {
+@@ -827,3 +863,10 @@ std::unique_ptr<void, std::function<void(void*)>> new_scoped_memory_pool() {
  }
  
  } // namespace mlx::core::metal

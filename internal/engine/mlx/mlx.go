@@ -123,11 +123,7 @@ func Init() {
 
 // ---------------------------------------------------------------- streams
 
-// Stream is an MLX stream (a device plus a queue). Streams are created with
-// mlx_stream_new_thread_unsafe: since MLX 0.32 a plain stream's command
-// encoder is registered only on the OS thread that created it, and vakt
-// opens an engine on one thread and scores on whichever thread the scoring
-// goroutine locks. Callers still use a stream from one thread at a time.
+// Stream is an MLX stream (a device plus a queue).
 type Stream struct{ c C.mlx_stream }
 
 // MetalAvailable reports whether a Metal GPU can be used.
@@ -140,13 +136,8 @@ func MetalAvailable() bool {
 	return bool(ok)
 }
 
-// CPU returns a new CPU stream.
-func CPU() *Stream {
-	Init()
-	d := C.mlx_device_new_type(C.MLX_CPU, 0)
-	defer C.mlx_device_free(d)
-	return &Stream{C.mlx_stream_new_thread_unsafe(d)}
-}
+// CPU returns the default CPU stream.
+func CPU() *Stream { Init(); return &Stream{C.mlx_default_cpu_stream_new()} }
 
 // GPUDevice returns a new stream on GPU number i.
 func GPUDevice(i int) (*Stream, error) {
@@ -157,16 +148,11 @@ func GPUDevice(i int) (*Stream, error) {
 	}
 	d := C.mlx_device_new_type(C.MLX_GPU, cint(i))
 	defer C.mlx_device_free(d)
-	return &Stream{C.mlx_stream_new_thread_unsafe(d)}, nil
+	return &Stream{C.mlx_stream_new_device(d)}, nil
 }
 
-// GPU returns a new stream on the first GPU (Metal or CUDA).
-func GPU() *Stream {
-	Init()
-	d := C.mlx_device_new_type(C.MLX_GPU, 0)
-	defer C.mlx_device_free(d)
-	return &Stream{C.mlx_stream_new_thread_unsafe(d)}
-}
+// GPU returns the default GPU stream (Metal or CUDA).
+func GPU() *Stream { Init(); return &Stream{C.mlx_default_gpu_stream_new()} }
 
 // Free releases the stream handle.
 func (s *Stream) Free() {

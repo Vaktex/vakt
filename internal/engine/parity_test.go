@@ -243,7 +243,7 @@ func TestDeltaKernelMatchesChunked(t *testing.T) {
 	ek := openMock(t, "mock-dom-0.8b", "fp32")
 	t.Setenv("VAKT_DELTANET", "chunked")
 	es := openMock(t, "mock-dom-0.8b", "fp32")
-	if es.m.delta != deltaChunkMode || ek.m.kern == nil {
+	if es.m.delta != deltaChunkMode || ek.m.delta != deltaKernel {
 		t.Fatal("engines did not pick the expected delta modes")
 	}
 	var long []int32
@@ -536,6 +536,9 @@ func TestFusedMatchesPlainRelease(t *testing.T) {
 	if testDevice() == "cpu" || !gpuOK() || gpuBackend != "metal" {
 		t.Skip("fused kernels are Metal-only")
 	}
+	if os.Getenv("VAKT_DELTANET") != "" {
+		t.Skip("VAKT_DELTANET forces one mode; this test compares both")
+	}
 	mk := func(n, seed int) []int32 {
 		v := make([]int32, n)
 		for i := range v {
@@ -548,53 +551,45 @@ func TestFusedMatchesPlainRelease(t *testing.T) {
 		{mk(300, 2), mk(120, 3), mk(64, 4)},
 		{mk(2500, 5)},
 	}
-	openMode := func(prec, mode string) *mlxEngine {
-		t.Setenv("VAKT_DELTANET", mode)
-		e, err := Open(Options{ModelPath: p, Precision: prec, Device: testDevice()})
-		if err != nil {
-			t.Fatal(err)
-		}
-		return e.(*mlxEngine)
-	}
 	for _, tc := range []struct {
 		prec string
 		tol  float64
 	}{{"fp32", 1e-4}, {"fp16", 5e-3}} {
-		plain := openMode(tc.prec, "chunked")
-		if plain.m.kern != nil {
-			t.Fatal("chunked engine picked the fused path")
+		fused, err := Open(Options{ModelPath: p, Precision: tc.prec, Device: testDevice()})
+		if err != nil {
+			t.Fatal(err)
 		}
-		for _, mode := range []struct {
-			env  string
-			want deltaMode
-		}{{"", deltaMLX}, {"kernel", deltaKernel}} {
-			fused := openMode(tc.prec, mode.env)
-			if fused.m.kern == nil || fused.m.delta != mode.want {
-				t.Fatalf("VAKT_DELTANET=%q did not pick the expected path", mode.env)
+		t.Setenv("VAKT_DELTANET", "chunked")
+		plain, err := Open(Options{ModelPath: p, Precision: tc.prec, Device: testDevice()})
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = os.Unsetenv("VAKT_DELTANET")
+		if fused.(*mlxEngine).m.kern == nil || plain.(*mlxEngine).m.kern != nil {
+			t.Fatal("engines did not pick the expected paths")
+		}
+		var maxD float64
+		for _, b := range batches {
+			a, err := fused.Score(context.Background(), b)
+			if err != nil {
+				t.Fatal(err)
 			}
-			var maxD float64
-			for _, b := range batches {
-				a, err := fused.Score(context.Background(), b)
-				if err != nil {
-					t.Fatal(err)
-				}
-				c, err := plain.Score(context.Background(), b)
-				if err != nil {
-					t.Fatal(err)
-				}
-				for i := range a {
-					maxD = math.Max(maxD, math.Abs(float64(a[i].Severity-c[i].Severity)))
-					for j := range core.NumFamilies {
-						maxD = math.Max(maxD, math.Abs(float64(a[i].Families[j]-c[i].Families[j])))
-					}
-				}
+			c, err := plain.Score(context.Background(), b)
+			if err != nil {
+				t.Fatal(err)
 			}
-			fused.Close()
-			t.Logf("%s, delta %d: fused vs plain max|Δ| %.3g", tc.prec, mode.want, maxD)
-			if maxD > tc.tol {
-				t.Errorf("%s, delta %d: fused vs plain max|Δ| %.3g > %g", tc.prec, mode.want, maxD, tc.tol)
+			for i := range a {
+				maxD = math.Max(maxD, math.Abs(float64(a[i].Severity-c[i].Severity)))
+				for j := range core.NumFamilies {
+					maxD = math.Max(maxD, math.Abs(float64(a[i].Families[j]-c[i].Families[j])))
+				}
 			}
 		}
+		fused.Close()
 		plain.Close()
+		t.Logf("%s: fused vs plain max|Δ| %.3g", tc.prec, maxD)
+		if maxD > tc.tol {
+			t.Errorf("%s: fused vs plain max|Δ| %.3g > %g", tc.prec, maxD, tc.tol)
+		}
 	}
 }
