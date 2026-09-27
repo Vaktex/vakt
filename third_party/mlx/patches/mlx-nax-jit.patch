@@ -1,23 +1,20 @@
 diff --git a/mlx/backend/metal/CMakeLists.txt b/mlx/backend/metal/CMakeLists.txt
-index a23005b..a82ce0f 100644
+index a23005b..5e18d86 100644
 --- a/mlx/backend/metal/CMakeLists.txt
 +++ b/mlx/backend/metal/CMakeLists.txt
-@@ -85,9 +85,15 @@ if(MLX_METAL_JIT)
+@@ -85,9 +85,13 @@ if(MLX_METAL_JIT)
  
    make_jit_source(steel/attn/kernels/steel_attention)
  
--  if(MLX_METAL_VERSION GREATER_EQUAL 400
++  # vakt: JIT kernels are compiled at run time, and is_nax_available() checks
++  # for macOS 26.2 and an M5-class GPU before any NAX path runs, so the NAX
++  # sources do not need a 26.2 deployment target (MLX 0.31 did not ask for
++  # one). Requiring it would drop the matmul units for every binary that
++  # still runs on macOS 14.
+   if(MLX_METAL_VERSION GREATER_EQUAL 400
 -     AND MACOS_SDK_VERSION VERSION_GREATER_EQUAL 26.2
 -     AND CMAKE_OSX_DEPLOYMENT_TARGET VERSION_GREATER_EQUAL 26.2)
-+  # vakt: JIT kernels are compiled at run time with the Metal language
-+  # version of the running OS (get_metal_version(): 4.0 on macOS 26), and
-+  # is_nax_available() checks for macOS 26.2 and an M5-class GPU before any
-+  # NAX path runs. So the NAX sources need neither a 26.2 deployment target
-+  # nor a build-time Metal 4 (MLX_METAL_VERSION comes from the metal compiler
-+  # at -mmacosx-version-min, i.e. 3.1 for a macOS 14 target). MLX 0.31 did
-+  # not ask for either; requiring them drops the matmul units from every
-+  # binary that still runs on macOS 14.
-+  if(MACOS_SDK_VERSION VERSION_GREATER_EQUAL 26.2)
++     AND MACOS_SDK_VERSION VERSION_GREATER_EQUAL 26.2)
  
      make_jit_source(
        steel/gemm/gemm_nax kernels/steel/utils.h kernels/steel/gemm/nax.h
