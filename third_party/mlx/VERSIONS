@@ -1,9 +1,13 @@
 # Pinned upstream sources for the native engine. build.sh reads this file.
-# mlx-c v0.6.0 is built against mlx v0.31.1 (see its CMakeLists GIT_TAG); keep
-# the pair in lockstep when bumping.
+# MLX is pinned to a main-branch commit (no release has the chunked
+# gated-delta kernels from ml-explore/mlx#4020 or the fused head-dim-256
+# SDPA yet); an empty *_TAG means "fetch this exact commit". The MLX commit
+# is the last one mlx-c main still compiles against (ml-explore/mlx#4507
+# changed gather_qmm's signature a day later). Keep the pair in lockstep
+# when bumping, and move back to tags once a release carries both.
 MLX_REPO=https://github.com/ml-explore/mlx
-MLX_TAG=v0.31.1
-MLX_COMMIT=ce45c52505c8158ea48d2a54e8caae05efd86bfe
+MLX_TAG=
+MLX_COMMIT=c948334a51977a5f02a7b4b0c7170bcb2dfb2df9
 MLXC_REPO=https://github.com/ml-explore/mlx-c
-MLXC_TAG=v0.6.0
-MLXC_COMMIT=0726ca922fc902c4c61ef9c27d94132be418e945
+MLXC_TAG=
+MLXC_COMMIT=ebc88f10caa1b625e6b581437a8dea6df8a70085

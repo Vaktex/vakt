@@ -5,6 +5,7 @@ package mlx
 import (
 	"math"
 	"os"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -315,4 +316,31 @@ func TestSoftmaxAndLayerNorm(t *testing.T) {
 		ln[i] = float32((float64(e)-mean)/math.Sqrt(v+1e-5)*float64(w[i]) + float64(b[i]))
 	}
 	near(t, "layer_norm", vals(t, x, x.LayerNorm(x.FromFloat32(a, 1, 4), x.FromFloat32(w, 4), x.FromFloat32(b, 4), 1e-5)), ln, 1e-5)
+}
+
+// TestStreamAcrossThreads uses a stream from an OS thread other than the one
+// that created it, as the engine does (Open on the caller's thread, Score on
+// the scoring goroutine's). MLX 0.32 binds plain streams to their creating
+// thread; vakt's streams must not be.
+func TestStreamAcrossThreads(t *testing.T) {
+	made := make(chan *Stream)
+	go func() {
+		runtime.LockOSThread() // never unlocked: the thread exits with the goroutine
+		made <- TestStream()
+	}()
+	s := <-made
+	defer s.Free()
+	done := make(chan error)
+	go func() {
+		runtime.LockOSThread()
+		defer runtime.UnlockOSThread()
+		x := NewCtx(s)
+		defer x.Free()
+		a := x.FromFloat32([]float32{1, 2, 3, 4}, 2, 2)
+		_, err := x.Float32s(x.Matmul(a, a))
+		done <- err
+	}()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
 }

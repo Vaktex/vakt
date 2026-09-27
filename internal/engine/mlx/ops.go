@@ -378,7 +378,7 @@ func (x *Ctx) Cumsum(a *Array, axis int, reverse, inclusive bool) *Array {
 		return x.empty()
 	}
 	res := C.mlx_array_new()
-	if !x.check("cumsum", C.mlx_cumsum(&res, a.c, cint(axis), C.bool(reverse), C.bool(inclusive), x.S.c)) {
+	if !x.check("cumsum", C.mlx_cumsum_axis(&res, a.c, cint(axis), C.bool(reverse), C.bool(inclusive), C.mlx_optional_dtype{has_value: false}, x.S.c)) {
 		C.mlx_array_free(res)
 		return x.empty()
 	}
@@ -464,11 +464,33 @@ func (x *Ctx) SDPA(q, k, v *Array, scale float32, mode string, mask *Array) *Arr
 		mc = mask.c
 	}
 	res := C.mlx_array_new()
-	if !x.check("sdpa", C.mlx_fast_scaled_dot_product_attention(&res, q.c, k.c, v.c, C.float(scale), cm, mc, C.vakt_null_array(), x.S.c)) {
+	// force_fused false: MLX picks its fused kernel where it is faster
+	// (head dim 256 on M5-class GPUs from 1024 queries).
+	if !x.check("sdpa", C.mlx_fast_scaled_dot_product_attention(&res, q.c, k.c, v.c, C.float(scale), cm, mc, C.vakt_null_array(), C.bool(false), x.S.c)) {
 		C.mlx_array_free(res)
 		return x.empty()
 	}
 	return x.track(res)
+}
+
+// GatedDeltaUpdate is mlx.fast.gated_delta_update with a zero initial state
+// and no mask: the gated delta rule over q, k [B,T,Hk,Dk], v [B,T,Hv,Dv],
+// per-token decays g and betas [B,T,Hv] (g is the multiplicative decay, not
+// its log). All inputs are cast to q's dtype. Returns the outputs
+// [B,T,Hv,Dv]; the final state is discarded. On Metal it runs MLX's
+// chunk-parallel kernels (matmul units on M5-class GPUs); elsewhere it falls
+// back to a per-token loop of plain ops, so only call it on Metal.
+func (x *Ctx) GatedDeltaUpdate(q, k, v, g, beta *Array) *Array {
+	if !x.ok("gated_delta_update", q, k, v, g, beta) {
+		return x.empty()
+	}
+	out, state := C.mlx_array_new(), C.mlx_array_new()
+	defer C.mlx_array_free(state)
+	if !x.check("gated_delta_update", C.mlx_fast_gated_delta_update(&out, &state, q.c, k.c, v.c, g.c, beta.c, C.vakt_null_array(), C.vakt_null_array(), x.S.c)) {
+		C.mlx_array_free(out)
+		return x.empty()
+	}
+	return x.track(out)
 }
 
 // ---------------------------------------------------------------- function table

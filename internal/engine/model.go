@@ -249,7 +249,8 @@ func (w *weights) free() {
 type deltaMode int
 
 const (
-	deltaKernel    deltaMode = iota // fused Metal kernels (GPU on darwin)
+	deltaKernel    deltaMode = iota // our fused Metal kernels (VAKT_DELTANET=kernel)
+	deltaMLX                        // conv+prep kernel + MLX's chunked gated_delta_update (Metal default)
 	deltaChunkMode                  // chunked algorithm with plain ops (portable default)
 	deltaScan                       // per-token scan with plain ops (test reference only)
 )
@@ -260,7 +261,7 @@ type model struct {
 	cancelled func() bool // checked between layers
 	delta     deltaMode
 	kern      *kernels  // fused Metal kernels (nil off Metal)
-	evalEvery int       // materialise the residual every N layers (0 = one graph)
+	evalEvery int       // materialise the residual every N layers (0 = one graph, -1 = by batch size)
 	prof      *profiler // per-stage timing (VAKT_PROFILE=1), nil otherwise
 }
 
@@ -285,6 +286,17 @@ func (m *model) forward(x *mlx.Ctx, ids *mlx.Array, mask *mlx.Array, lengths []i
 	// final norm after the last layer).
 	n := m.prof.mark(x, "norm", m.rmsNorm(x, h, w.layers[0].inNorm))
 	inLx := false // whether h and n are still owned by lx
+	every := m.evalEvery
+	if every < 0 {
+		// Small batches: three layers per graph, so the GPU waits on the
+		// host 8 times per batch instead of 24; a few layers of activations
+		// at <= smallBatchTokens are a few hundred MB. Big batches (long
+		// sequences) keep one layer per graph to bound memory.
+		every = 1
+		if B*T <= smallBatchTokens {
+			every = 3
+		}
+	}
 	for i, L := range w.layers {
 		if m.cancelled != nil && m.cancelled() {
 			x.Fail(errCancelled)
@@ -303,7 +315,7 @@ func (m *model) forward(x *mlx.Ctx, ids *mlx.Array, mask *mlx.Array, lengths []i
 		}
 		h, n = m.addNorm(lx, h, m.mlp(lx, n, L, B, T), next, B, T)
 		inLx = true
-		if m.evalEvery > 0 && (i+1)%m.evalEvery == 0 {
+		if every > 0 && ((i+1)%every == 0 || i+1 == len(w.layers)) {
 			if err := lx.Eval(h, n); err != nil {
 				x.Fail(err)
 				return x.Zeros(mlx.Float32, B, T, hidden)
@@ -402,10 +414,11 @@ func (m *model) attention(x *mlx.Ctx, h *mlx.Array, L layerW, B, T int) *mlx.Arr
 	return m.prof.mark(x, "attn.o", x.Matmul(o, L.o))
 }
 
-// attnBlock bounds the query block of full attention. MLX 0.31.1 has no fused
-// Metal kernel for head_dim 256 beyond 8 queries and falls back to
-// materialising the [B, Hq, Tq, Tk] score matrix: at T=16k that is ~8.6 GB
-// per layer. Blocking queries keeps it at [B, Hq, attnBlock, <=T].
+// attnBlock bounds the query block of full attention. Below 1024 queries (and
+// on GPUs without matmul units) MLX's SDPA for head_dim 256 materialises the
+// [B, Hq, Tq, Tk] score matrix: at T=16k that would be ~8.6 GB per layer.
+// Blocking queries keeps it at [B, Hq, attnBlock, <=T]; each 1024-query block
+// still qualifies for MLX's fused head-dim-256 kernel on M5-class GPUs.
 const attnBlock = 1024
 
 // blockedCausalSDPA computes causal attention one query block at a time.
@@ -434,8 +447,20 @@ func blockedCausalSDPA(x *mlx.Ctx, q, k, v *mlx.Array, scale float32, B, T int) 
 // linearAttention is the Gated DeltaNet layer.
 func (m *model) linearAttention(x *mlx.Ctx, h, mask *mlx.Array, L layerW, lengths []int, B, T int) *mlx.Array {
 	// apply_mask_to_padding_states: zero padded positions first.
-	h = x.Multiply(h, x.AsType(mask, h.Dtype()))
+	if m.kern == nil {
+		h = x.Multiply(h, x.AsType(mask, h.Dtype()))
+	}
+	// On the fused path the padding mask is skipped: sequences are
+	// right-padded and every mixer is causal, so padded positions never
+	// reach a real one, and pooling masks them out.
 	proj := m.prof.mark(x, "lin.in_proj", x.Matmul(h, L.inProj)) // [B, T, 6144+2048+16+16]
+	if m.delta == deltaMLX && m.kern != nil {
+		q, k, v, g, beta := m.kern.convDeltaPrep(x, proj, L, B, T)
+		m.prof.mark(x, "lin.conv_prep", q)
+		core := m.prof.mark(x, "lin.delta", x.GatedDeltaUpdate(q, k, v, g, beta))
+		o := m.prof.mark(x, "lin.gated_norm", m.kern.gatedNorm(x, core, proj, L.gnorm, h.Dtype(), B, T))
+		return m.prof.mark(x, "lin.out_proj", x.Matmul(o, L.outProj))
+	}
 	if m.delta == deltaKernel && m.kern != nil {
 		// Metal: three fused kernels read their columns of proj in place.
 		conv := m.prof.mark(x, "lin.conv", m.kern.convSilu(x, proj, L.convTapsKC, B, T))

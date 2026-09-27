@@ -143,15 +143,20 @@ func open(opts Options) (core.Engine, error) {
 		s.Free()
 		return nil, err
 	}
-	m := &model{w: w, delta: deltaChunkMode, evalEvery: evalEveryFromEnv(1), prof: newProfilerFromEnv()}
+	m := &model{w: w, delta: deltaChunkMode, evalEvery: evalEveryFromEnv(-1), prof: newProfilerFromEnv()}
 	switch os.Getenv("VAKT_DELTANET") {
 	case "scan":
 		m.delta = deltaScan
 	case "chunked":
 		m.delta = deltaChunkMode
 	}
-	if backend == "metal" && os.Getenv("VAKT_DELTANET") == "" {
-		m.delta, m.kern = deltaKernel, newKernels()
+	if backend == "metal" {
+		switch os.Getenv("VAKT_DELTANET") {
+		case "":
+			m.delta, m.kern = deltaMLX, newKernels()
+		case "kernel":
+			m.delta, m.kern = deltaKernel, newKernels()
+		}
 	}
 	return &mlxEngine{
 		s: s, m: m, maxBT: maxBatchTokens(backend),
@@ -403,6 +408,10 @@ func configureMemory(backend string) {
 	// Keep a bounded buffer cache so long scans don't grow without limit.
 	mlx.SetCacheLimit(2 << 30)
 }
+
+// smallBatchTokens is the padded batch size up to which the forward
+// evaluates several layers per graph (see model.forward).
+const smallBatchTokens = 8192
 
 func evalEveryFromEnv(def int) int {
 	if v := os.Getenv("VAKT_EVAL_EVERY"); v != "" {
