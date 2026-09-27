@@ -15,7 +15,7 @@ go build -tags mlx ./cmd/vakt
 | RMSNorm: `x̂ · (1 + w)`, computed in f32 | `rmsNorm`, with `(1 + w)` folded in at load |
 | Decoder layer: pre-norm residual | `forward` |
 | Gated attention: q_proj holds query and gate per head; q/k RMSNorm; partial RoPE (64 of 256, θ = 1e7, rotate_half); GQA 8/2; output × sigmoid(gate) | `attention` (fused q\|k\|v projection, MLX `fast.rope`, `fast.scaled_dot_product_attention` in causal mode) |
-| Gated DeltaNet: mask padding; in_proj_qkv; causal depthwise conv (k=4) + SiLU; l2norm q/k; q × 1/√128; β = σ(b); g = −exp(A_log) · softplus(a + dt_bias); gated delta rule; RMSNormGated (plain w) · SiLU(z); out_proj | `linearAttention` (fused qkv\|z\|b\|a projection; on Metal three fused kernels: `convPrep`, `gatedDelta`, `gatedNorm`) |
+| Gated DeltaNet: mask padding; in_proj_qkv; causal depthwise conv (k=4) + SiLU; l2norm q/k; q × 1/√128; β = σ(b); g = −exp(A_log) · softplus(a + dt_bias); gated delta rule; RMSNormGated (plain w) · SiLU(z); out_proj | `linearAttention` (fused qkv\|z\|b\|a projection; on Metal four fused kernels: `convSilu`, `deltaPrep`, `gatedDelta`, `gatedNorm`) |
 | `AttentionPool` (f32): 4 queries × 256, keys/values without bias, scores × 1/16 masked to −1e4 before the softmax, weighted sum of values, project + LayerNorm (eps 1e-5) | `attentionPool` |
 | `MLPHead` (f32) for binary_head and auxiliary_head: LayerNorm → Linear 1024→2048 → exact (erf) GELU → Linear, then sigmoid | `mlpHead`, `mlxEngine.Score` |
 
@@ -40,7 +40,8 @@ MLX turns on TF32 for f32 GPU matmuls by default (`MLX_ENABLE_TF32=1`). `mlx.Ini
 
 On Metal the whole DeltaNet mixer between `in_proj` and `out_proj` is three kernels that read their columns of the fused projection in place, and the MLP activation is one more. The plain-ops path made ~20 full passes over `[B·T, 2048..6144]` tensors per layer (splits, casts, l2norms, sigmoids, reshape copies), which left the layer memory-bound once the matmuls got fast.
 
-- `convPrep`: causal depthwise conv plus SiLU over the q|k|v columns of the projection, fused with the recurrence's per-(token, head) scalars: the l2norm factors of q and k, β = σ(b) and the decay exp(g), g = −exp(A_log) · softplus(a + dt_bias). One SIMD group per (token, head). MLX's general `conv1d` was about 10× slower than a hand-written conv here.
+- `convSilu`: causal depthwise conv plus SiLU in one pass, reading the q|k|v columns of the projection, 4 channels per thread. MLX's general `conv1d` was about 10× slower here. (Fusing it with `deltaPrep` into one SIMD group per (token, head) was slower on an M5 Pro: a third of the threads, each with three times the serial work.)
+- `deltaPrep`: the per-(token, head) scalars of the recurrence, computed once: the l2norm factors of q and k, β = σ(b) and the decay exp(g), g = −exp(A_log) · softplus(a + dt_bias).
 - `gatedDelta`: the gated delta recurrence. Each value column is owned by a quad of 4 lanes holding 32 state rows each, and a SIMD group covers 8 columns, so the two reductions over Dk per token are two quad shuffles (not a five-level `simd_sum`) and each token's q and k are read once per 8 columns. The l2norm factors and the decay are applied to the dot products rather than per element. (MLX's chunked `gated_delta_update`, tried on MLX main, was slower than this design's predecessor on an M5 Pro.) It follows the design of mlx-lm's `gated_delta` kernel (MIT) and matches `torch_recurrent_gated_delta_rule` in f32.
 - `gatedNorm`: RMSNormGated · SiLU(z) and the cast for `out_proj`, one SIMD group per (token, head).
 - `swiglu`: SiLU(gate) · up over the fused gate|up projection.
