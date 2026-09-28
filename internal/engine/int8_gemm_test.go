@@ -7,9 +7,13 @@ package engine
 //	go test -tags mlx -run Int8Gemm -bench Int8Gemm -benchtime 20x -v ./internal/engine
 
 import (
+	"context"
+	"encoding/json"
 	"fmt"
 	"math"
 	"math/rand"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -174,5 +178,54 @@ func TestQuantizeWeight(t *testing.T) {
 				t.Fatalf("q out of range: %v", qv[n*K+k])
 			}
 		}
+	}
+}
+
+// TestInt8Sensitivity measures, on the published weights, how far scores
+// move when each backbone matmul kind (and some combinations) runs in int8,
+// the rest staying fp16. It only reports; pick VAKT_INT8 from its table.
+//
+//	VAKT_RELEASE_MODEL=... go test -tags mlx -run Int8Sensitivity -v ./internal/engine
+func TestInt8Sensitivity(t *testing.T) {
+	p := os.Getenv("VAKT_RELEASE_MODEL")
+	if p == "" {
+		t.Skip("set VAKT_RELEASE_MODEL to the downloaded model.safetensors")
+	}
+	needNAX(t).Free()
+	b, err := os.ReadFile(filepath.Join(testdata, "parity", "release", "fixtures.json"))
+	if err != nil {
+		t.Skip("release fixtures not present")
+	}
+	var f fixtures
+	if err := json.Unmarshal(b, &f); err != nil {
+		t.Fatal(err)
+	}
+	configs := append([]string{}, int8MatmulKinds...)
+	configs = append(configs,
+		"in_proj,gate_up,qkv",
+		"in_proj,gate_up,qkv,out_proj,o",
+		"in_proj,out_proj,gate_up,qkv,o,down",
+	)
+	for _, cfg := range configs {
+		t.Setenv("VAKT_INT8", cfg)
+		e, err := Open(Options{ModelPath: p, Precision: "int8", Device: testDevice()})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var maxS, maxP, sumS float64
+		for _, s := range f.Samples {
+			got, err := e.Score(context.Background(), [][]int32{s.IDs})
+			if err != nil {
+				t.Fatal(err)
+			}
+			d := math.Abs(float64(got[0].Severity) - s.Severity)
+			maxS = math.Max(maxS, d)
+			sumS += d
+			for i, v := range s.Families {
+				maxP = math.Max(maxP, math.Abs(float64(got[0].Families[i])-v))
+			}
+		}
+		e.Close()
+		t.Logf("int8 %-38s max|Δs| %.3g  mean|Δs| %.3g  max|Δp| %.3g", cfg, maxS, sumS/float64(len(f.Samples)), maxP)
 	}
 }

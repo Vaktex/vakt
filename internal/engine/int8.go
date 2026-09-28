@@ -14,6 +14,8 @@ package engine
 
 import (
 	"fmt"
+	"os"
+	"strings"
 
 	"github.com/vaktex/vakt/internal/engine/mlx"
 )
@@ -90,6 +92,27 @@ const quantRowsSource = `
     }
     if (tid == 0) { s[row] = sc; }
 `
+
+// int8MatmulKinds are the backbone matmuls --precision int8 can run in int8.
+var int8MatmulKinds = []string{"in_proj", "out_proj", "gate_up", "down", "qkv", "o"}
+
+// int8Kinds is the set of matmul kinds that run in int8: VAKT_INT8 as a
+// comma-separated list of int8MatmulKinds, or all of them. The others stay
+// fp16, so accuracy can be traded against speed per kind.
+func int8Kinds() map[string]bool {
+	out := map[string]bool{}
+	v := strings.TrimSpace(os.Getenv("VAKT_INT8"))
+	if v == "" {
+		for _, k := range int8MatmulKinds {
+			out[k] = true
+		}
+		return out
+	}
+	for _, k := range strings.Split(v, ",") {
+		out[strings.TrimSpace(k)] = true
+	}
+	return out
+}
 
 // q8w is a weight quantized for the int8 GEMM: q int8 [N,K], s float32 [N].
 type q8w struct{ q, s *mlx.Array }

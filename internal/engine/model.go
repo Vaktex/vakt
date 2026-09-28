@@ -147,9 +147,10 @@ func loadWeights(x *mlx.Ctx, raw map[string]*mlx.Array, prefix string, compute m
 		return x.Contiguous(x.Transpose(cast(cat), 1, 0))
 	}
 	// mm keeps a backbone matmul weight and, in int8 mode, its int8 copy.
-	mm := func(a *mlx.Array) *mlx.Array {
+	kinds := int8Kinds()
+	mm := func(kind string, a *mlx.Array) *mlx.Array {
 		a = keep(a)
-		if int8 {
+		if int8 && kinds[kind] {
 			q := quantizeWeight(x, a)
 			w.q8[a] = q8w{q: keep(q.q), s: keep(q.s)}
 		}
@@ -163,18 +164,18 @@ func loadWeights(x *mlx.Ctx, raw map[string]*mlx.Array, prefix string, compute m
 		L := layerW{
 			inNorm:   keep(onePlus(get(lp + "input_layernorm.weight"))),
 			postNorm: keep(onePlus(get(lp + "post_attention_layernorm.weight"))),
-			gateUp:   mm(lin(lp+"mlp.gate_proj.weight", lp+"mlp.up_proj.weight")),
-			down:     mm(lin(lp + "mlp.down_proj.weight")),
+			gateUp:   mm("gate_up", lin(lp+"mlp.gate_proj.weight", lp+"mlp.up_proj.weight")),
+			down:     mm("down", lin(lp+"mlp.down_proj.weight")),
 		}
 		if isFull(i) {
 			a := lp + "self_attn."
-			L.qkv = mm(lin(a+"q_proj.weight", a+"k_proj.weight", a+"v_proj.weight"))
+			L.qkv = mm("qkv", lin(a+"q_proj.weight", a+"k_proj.weight", a+"v_proj.weight"))
 			L.qNorm = keep(onePlus(get(a + "q_norm.weight")))
 			L.kNorm = keep(onePlus(get(a + "k_norm.weight")))
-			L.o = mm(lin(a + "o_proj.weight"))
+			L.o = mm("o", lin(a+"o_proj.weight"))
 		} else {
 			a := lp + "linear_attn."
-			L.inProj = mm(lin(a+"in_proj_qkv.weight", a+"in_proj_z.weight", a+"in_proj_b.weight", a+"in_proj_a.weight"))
+			L.inProj = mm("in_proj", lin(a+"in_proj_qkv.weight", a+"in_proj_z.weight", a+"in_proj_b.weight", a+"in_proj_a.weight"))
 			// PyTorch depthwise conv weight [C, 1, K] -> K contiguous [C] taps.
 			cw := cast(get(a + "conv1d.weight"))
 			for k := 0; k < convKernel; k++ {
@@ -185,7 +186,7 @@ func loadWeights(x *mlx.Ctx, raw map[string]*mlx.Array, prefix string, compute m
 			L.aLogNeg = keep(x.Negative(x.Exp(f32(get(a + "A_log")))))
 			L.dtBias = keep(f32(get(a + "dt_bias")))
 			L.gnorm = keep(f32(get(a + "norm.weight")))
-			L.outProj = mm(lin(a + "out_proj.weight"))
+			L.outProj = mm("out_proj", lin(a+"out_proj.weight"))
 		}
 		w.layers = append(w.layers, L)
 		if err := materialise(); err != nil {
