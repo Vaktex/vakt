@@ -1,0 +1,8 @@
+Required Notice: Copyright 2026 Vaktex (https://vaktex.com)
+
+vakt is licensed under the PolyForm Noncommercial License 1.0.0 (see LICENSE).
+For commercial use, contact hello@vaktex.com.
+
+Vendored third-party code keeps its own license; see third_party/README.md.
+The DOM-0.8B model weights are not part of this repository and are
+distributed separately under the terms on their Hugging Face model page.

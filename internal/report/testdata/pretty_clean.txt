@@ -1,0 +1,5 @@
+Vaktex OSS dev DOM-0.8B main abababababab metal Apple M5 Pro fp32
+5 files 6 units 2.5s 13.2k tok/s 1 cached
+
+1 file skipped (see the JSON report for reasons)
+✓ All clear: no units at or above 0.95 across 5 files (6 units scanned).

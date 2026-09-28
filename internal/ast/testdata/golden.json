@@ -1,0 +1,388 @@
+{
+  "Bash sample.sh": [
+    {
+      "kind": "function",
+      "name": "cleanup",
+      "start": 6,
+      "end": 8
+    },
+    {
+      "kind": "residual",
+      "name": "\u003ctop-level\u003e",
+      "start": 1,
+      "end": 10
+    }
+  ],
+  "C sample.c": [
+    {
+      "kind": "function",
+      "name": "copy",
+      "start": 6,
+      "end": 9
+    },
+    {
+      "kind": "function",
+      "name": "main",
+      "start": 11,
+      "end": 15
+    },
+    {
+      "kind": "residual",
+      "name": "\u003ctop-level\u003e",
+      "start": 1,
+      "end": 4
+    }
+  ],
+  "C# sample.cs": [
+    {
+      "kind": "method",
+      "name": "Demo.Repo.Repo",
+      "start": 5,
+      "end": 5
+    },
+    {
+      "kind": "method",
+      "name": "Demo.Repo.Find",
+      "start": 7,
+      "end": 10
+    },
+    {
+      "kind": "residual",
+      "name": "\u003ctop-level\u003e",
+      "start": 1,
+      "end": 12
+    }
+  ],
+  "C++ sample.cpp": [
+    {
+      "kind": "function",
+      "name": "app.first",
+      "start": 5,
+      "end": 8
+    },
+    {
+      "kind": "method",
+      "name": "app.Buffer.at",
+      "start": 12,
+      "end": 12
+    },
+    {
+      "kind": "residual",
+      "name": "\u003ctop-level\u003e",
+      "start": 1,
+      "end": 17
+    }
+  ],
+  "Go sample.go": [
+    {
+      "kind": "function",
+      "name": "Run",
+      "start": 7,
+      "end": 10
+    },
+    {
+      "kind": "function",
+      "name": "Store.Get",
+      "start": 14,
+      "end": 16
+    },
+    {
+      "kind": "residual",
+      "name": "\u003ctop-level\u003e",
+      "start": 1,
+      "end": 12
+    }
+  ],
+  "Java Sample.java": [
+    {
+      "kind": "method",
+      "name": "Sample.Sample",
+      "start": 8,
+      "end": 10
+    },
+    {
+      "kind": "method",
+      "name": "Sample.find",
+      "start": 12,
+      "end": 15
+    },
+    {
+      "kind": "residual",
+      "name": "\u003ctop-level\u003e",
+      "start": 1,
+      "end": 16
+    }
+  ],
+  "JavaScript sample.js": [
+    {
+      "kind": "function",
+      "name": "readFile",
+      "start": 5,
+      "end": 7
+    },
+    {
+      "kind": "function",
+      "name": "handler",
+      "start": 9,
+      "end": 11
+    },
+    {
+      "kind": "function",
+      "name": "exported",
+      "start": 13,
+      "end": 15
+    },
+    {
+      "kind": "method",
+      "name": "Server.constructor",
+      "start": 18,
+      "end": 20
+    },
+    {
+      "kind": "method",
+      "name": "Server.listen",
+      "start": 21,
+      "end": 23
+    },
+    {
+      "kind": "residual",
+      "name": "\u003ctop-level\u003e",
+      "start": 1,
+      "end": 24
+    }
+  ],
+  "Kotlin sample.kt": [
+    {
+      "kind": "function",
+      "name": "read",
+      "start": 3,
+      "end": 5
+    },
+    {
+      "kind": "method",
+      "name": "Repo.find",
+      "start": 8,
+      "end": 8
+    },
+    {
+      "kind": "residual",
+      "name": "\u003ctop-level\u003e",
+      "start": 1,
+      "end": 9
+    }
+  ],
+  "Lua sample.lua": [
+    {
+      "kind": "function",
+      "name": "M.run",
+      "start": 3,
+      "end": 5
+    },
+    {
+      "kind": "function",
+      "name": "helper",
+      "start": 7,
+      "end": 9
+    }
+  ],
+  "PHP sample.php": [
+    {
+      "kind": "function",
+      "name": "find",
+      "start": 6,
+      "end": 9
+    },
+    {
+      "kind": "method",
+      "name": "Ctl.show",
+      "start": 12,
+      "end": 14
+    },
+    {
+      "kind": "residual",
+      "name": "\u003ctop-level\u003e",
+      "start": 1,
+      "end": 15
+    }
+  ],
+  "Python sample.py": [
+    {
+      "kind": "function",
+      "name": "run",
+      "start": 8,
+      "end": 10
+    },
+    {
+      "kind": "function",
+      "name": "load",
+      "start": 13,
+      "end": 16
+    },
+    {
+      "kind": "method",
+      "name": "Store.__init__",
+      "start": 20,
+      "end": 21
+    },
+    {
+      "kind": "method",
+      "name": "Store.get",
+      "start": 23,
+      "end": 26
+    },
+    {
+      "kind": "class",
+      "name": "Empty",
+      "start": 29,
+      "end": 30
+    },
+    {
+      "kind": "residual",
+      "name": "\u003ctop-level\u003e",
+      "start": 1,
+      "end": 19
+    }
+  ],
+  "Ruby sample.rb": [
+    {
+      "kind": "function",
+      "name": "run",
+      "start": 5,
+      "end": 7
+    },
+    {
+      "kind": "method",
+      "name": "Store.get",
+      "start": 10,
+      "end": 12
+    },
+    {
+      "kind": "residual",
+      "name": "\u003ctop-level\u003e",
+      "start": 1,
+      "end": 13
+    }
+  ],
+  "Rust sample.rs": [
+    {
+      "kind": "function",
+      "name": "run",
+      "start": 5,
+      "end": 9
+    },
+    {
+      "kind": "method",
+      "name": "Buf.get",
+      "start": 14,
+      "end": 16
+    },
+    {
+      "kind": "residual",
+      "name": "\u003ctop-level\u003e",
+      "start": 1,
+      "end": 17
+    }
+  ],
+  "Scala sample.scala": [
+    {
+      "kind": "method",
+      "name": "Main.run",
+      "start": 2,
+      "end": 2
+    },
+    {
+      "kind": "method",
+      "name": "Store.get",
+      "start": 6,
+      "end": 6
+    },
+    {
+      "kind": "residual",
+      "name": "\u003ctop-level\u003e",
+      "start": 1,
+      "end": 7
+    }
+  ],
+  "Solidity sample.sol": [
+    {
+      "kind": "method",
+      "name": "Vault.withdraw",
+      "start": 6,
+      "end": 10
+    },
+    {
+      "kind": "method",
+      "name": "Vault.onlyOwner",
+      "start": 12,
+      "end": 14
+    },
+    {
+      "kind": "residual",
+      "name": "\u003ctop-level\u003e",
+      "start": 1,
+      "end": 15
+    }
+  ],
+  "Terraform main.tf": [
+    {
+      "kind": "function",
+      "name": "provider.aws",
+      "start": 1,
+      "end": 3
+    },
+    {
+      "kind": "function",
+      "name": "resource.aws_s3_bucket.logs",
+      "start": 5,
+      "end": 8
+    }
+  ],
+  "TypeScript sample.ts": [
+    {
+      "kind": "function",
+      "name": "getUser",
+      "start": 7,
+      "end": 10
+    },
+    {
+      "kind": "function",
+      "name": "verify",
+      "start": 12,
+      "end": 12
+    },
+    {
+      "kind": "method",
+      "name": "UserService.find",
+      "start": 16,
+      "end": 18
+    },
+    {
+      "kind": "residual",
+      "name": "\u003ctop-level\u003e",
+      "start": 1,
+      "end": 19
+    }
+  ],
+  "VBA sample.bas": [
+    {
+      "kind": "function",
+      "name": "RunIt",
+      "start": 4,
+      "end": 6
+    },
+    {
+      "kind": "function",
+      "name": "Add",
+      "start": 8,
+      "end": 10
+    }
+  ],
+  "YAML notes.yaml": [
+    {
+      "kind": "file",
+      "name": "",
+      "start": 1,
+      "end": 3
+    }
+  ]
+}

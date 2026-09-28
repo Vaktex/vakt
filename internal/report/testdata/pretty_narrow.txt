@@ -1,0 +1,24 @@
+Vaktex OSS dev DOM-0.8B main abababababab metal Apple M5 ...
+5 files 6 units 2.5s 13.2k tok/s 1 cached
+
+Top Findings
+  SEVERITY         FAMILY         CONF  LOCATION    UNIT
+  █████████░ 0.93  memory_safety  0.91  ...c:12-48  read_...
+  █████████░ 0.88  memory_safety  0.90  ...:10-400  parse...
+
+Families
+  memory_safety        ▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇ 2
+  authorization        ▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇ 1
+  data_neutralization  ▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇ 1
+
+Flagged files
+  0.93 src/net.c
+    └─ 0.93 read_packet
+  0.88 src/parse.c
+    └─ 0.88 parse_header
+  0.78 app/views.py
+    ├─ 0.78 search
+    └─ 0.61 Admin.delete
+
+1 file skipped (see the JSON report for reasons)
+4 units flagged across 3 files

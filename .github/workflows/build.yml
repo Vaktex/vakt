@@ -1,0 +1,377 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  GARBLE_VERSION: v0.18.0
+  # ubuntu22.04 base => glibc 2.35 floor, matching install.sh MIN_GLIBC.
+  # Pinned by digest (tag 13.0.3-cudnn-devel-ubuntu22.04).
+  CUDA_IMAGE: nvidia/cuda@sha256:047cef4ac7248a01c715042dea75757268851abf1a0e6dcbd7648ff1180f1b89
+  STATICCHECK_VERSION: 2026.2.1
+  GOSEC_VERSION: v2.29.0
+  GOVULNCHECK_VERSION: v1.8.0
+  RUST_TOOLCHAIN: 1.98.1
+
+jobs:
+  lint:
+    name: lint
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: ${{ !startsWith(github.ref, 'refs/tags/') }}
+      - name: Tools
+        run: |
+          sudo apt-get update && sudo apt-get install -y --no-install-recommends shellcheck bats
+          go install "honnef.co/go/tools/cmd/staticcheck@${STATICCHECK_VERSION}"
+          go install "github.com/securego/gosec/v2/cmd/gosec@${GOSEC_VERSION}"
+          go install "golang.org/x/vuln/cmd/govulncheck@${GOVULNCHECK_VERSION}"
+          rustup toolchain install "${RUST_TOOLCHAIN}" --profile minimal && rustup default "${RUST_TOOLCHAIN}"
+      - name: Tokenizers static lib (linked by internal/tokenize)
+        run: make deps-tokenizers BACKEND=fake
+      - name: Lint (no native engine)
+        run: |
+          make lint BACKEND=fake
+          shellcheck .github/scripts/*.sh
+      - name: Unit tests (no native engine)
+        run: make test BACKEND=fake
+      - name: Installer tests
+        run: |
+          bats test/                          # /bin/sh is dash on Ubuntu
+          sudo apt-get install -y --no-install-recommends busybox
+          printf '#!/bin/sh\nexec busybox sh "$@"\n' > "$RUNNER_TEMP/bbsh"
+          chmod +x "$RUNNER_TEMP/bbsh"
+          VAKT_TEST_SHELL="$RUNNER_TEMP/bbsh" bats test/
+
+  macos:
+    name: macos-arm64-metal
+    runs-on: macos-15
+    timeout-minutes: 90
+    env:
+      BACKEND: metal
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: ${{ !startsWith(github.ref, 'refs/tags/') }}
+      - name: Tools
+        run: |
+          brew install ccache
+          go install "mvdan.cc/garble@${GARBLE_VERSION}"
+          rustup toolchain install "${RUST_TOOLCHAIN}" --profile minimal && rustup default "${RUST_TOOLCHAIN}"
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0 # zizmor: ignore[cache-poisoning]
+        # Release (tag) builds always build native deps from source.
+        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+        with:
+          path: |
+            third_party/mlx/install
+            third_party/tokenizers/lib
+            ~/Library/Caches/ccache
+          key: native-${{ runner.os }}-${{ runner.arch }}-metal-${{ hashFiles('third_party/mlx/VERSIONS', 'third_party/mlx/build.sh', 'third_party/tokenizers/build.sh') }}
+      - name: Native deps
+        run: make deps
+      - name: Tests
+        # Hosted macOS runners expose a paravirtual GPU whose Metal compute
+        # support varies; engine tests fall back to the MLX CPU stream.
+        env:
+          VAKT_TEST_DEVICE: cpu
+        run: make test
+      - name: Parity fixtures
+        id: fixtures
+        env:
+          FIXTURES_URL: ${{ vars.PARITY_FIXTURES_URL }}
+          FIXTURES_SHA256: ${{ vars.PARITY_FIXTURES_SHA256 }}
+        run: ./.github/scripts/fetch-fixtures.sh
+      - name: Parity
+        if: steps.fixtures.outputs.available == 'true'
+        env:
+          VAKT_TEST_DEVICE: cpu
+        run: make parity
+      - name: Release build
+        run: |
+          . .github/scripts/version.sh
+          make prod VERSION="$VAKT_VERSION" COMMIT="${GITHUB_SHA::7}"
+      - name: Audit
+        run: |
+          . .github/scripts/version.sh
+          make audit VERSION="$VAKT_VERSION"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: vakt-darwin-arm64
+          path: dist/vakt-darwin-arm64
+          if-no-files-found: error
+          # Hand-off between jobs only; the cleanup job deletes it at the end of
+          # the run. Releases live in R2, never on GitHub.
+          retention-days: 1
+
+  linux-cuda:
+    name: linux-${{ matrix.arch }}-cuda13
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 150
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: ubuntu-24.04, arch: amd64 }
+          - { runner: ubuntu-24.04-arm, arch: arm64 }
+    steps:
+      # The CUDA devel image is ~10 GB and the MLX CUDA build needs several
+      # more; free host disk before starting the build container. This is why
+      # the build runs through `docker run` rather than a `container:` job,
+      # which would start before any step could clean the host.
+      - uses: jlumbroso/free-disk-space@ceedf095f4ec1a097402bc6bd80831f2e1a6fde6 # v2.0.0
+        with:
+          tool-cache: true
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          docker-images: true
+          swap-storage: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0 # zizmor: ignore[cache-poisoning]
+        # Release (tag) builds always build native deps from source.
+        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+        with:
+          path: |
+            third_party/mlx/install
+            third_party/tokenizers/lib
+            .ccache
+          key: native-linux-${{ matrix.arch }}-cuda13-${{ hashFiles('third_party/mlx/VERSIONS', 'third_party/mlx/build.sh', 'third_party/tokenizers/build.sh') }}
+      - name: Build in CUDA 13 container
+        run: |
+          . .github/scripts/version.sh
+          docker run --rm \
+            -v "$PWD:/src" -w /src \
+            -e CCACHE_DIR=/src/.ccache \
+            -e VERSION="$VAKT_VERSION" -e COMMIT="${GITHUB_SHA::7}" \
+            -e GARBLE_VERSION -e RUST_TOOLCHAIN \
+            -e JOBS=3 \
+            "$CUDA_IMAGE" \
+            bash .github/scripts/linux-build.sh cuda
+      - name: Unit tests (no GPU on hosted runners)
+        run: |
+          docker run --rm -v "$PWD:/src" -w /src "$CUDA_IMAGE" \
+            bash .github/scripts/linux-build.sh test-fake
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: vakt-linux-${{ matrix.arch }}-cuda13
+          path: dist/vakt-linux-${{ matrix.arch }}-cuda13
+          if-no-files-found: error
+          # Hand-off between jobs only; the cleanup job deletes it at the end of
+          # the run. Releases live in R2, never on GitHub.
+          retention-days: 1
+
+  linux-cpu:
+    name: linux-${{ matrix.arch }}-cpu
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: ubuntu-22.04, arch: amd64 }
+          - { runner: ubuntu-22.04-arm, arch: arm64 }
+    env:
+      BACKEND: cpu
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: ${{ !startsWith(github.ref, 'refs/tags/') }}
+      - name: Tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends cmake ninja-build ccache libopenblas-dev liblapack-dev liblapacke-dev
+          go install "mvdan.cc/garble@${GARBLE_VERSION}"
+          rustup toolchain install "${RUST_TOOLCHAIN}" --profile minimal && rustup default "${RUST_TOOLCHAIN}"
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0 # zizmor: ignore[cache-poisoning]
+        # Release (tag) builds always build native deps from source.
+        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+        with:
+          path: |
+            third_party/mlx/install
+            third_party/tokenizers/lib
+            ~/.cache/ccache
+          key: native-linux-${{ matrix.arch }}-cpu-${{ hashFiles('third_party/mlx/VERSIONS', 'third_party/mlx/build.sh', 'third_party/tokenizers/build.sh') }}
+      - name: Native deps
+        run: make deps
+      - name: Tests (CPU engine)
+        run: make test
+      - name: Parity fixtures
+        id: fixtures
+        env:
+          FIXTURES_URL: ${{ vars.PARITY_FIXTURES_URL }}
+          FIXTURES_SHA256: ${{ vars.PARITY_FIXTURES_SHA256 }}
+        run: ./.github/scripts/fetch-fixtures.sh
+      - name: Parity (CPU)
+        if: steps.fixtures.outputs.available == 'true' && matrix.arch == 'amd64'
+        run: make parity
+      - name: Release build
+        run: |
+          . .github/scripts/version.sh
+          make prod VERSION="$VAKT_VERSION" COMMIT="${GITHUB_SHA::7}"
+      - name: Audit
+        run: |
+          . .github/scripts/version.sh
+          make audit VERSION="$VAKT_VERSION"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: vakt-linux-${{ matrix.arch }}-cpu
+          path: dist/vakt-linux-${{ matrix.arch }}-cpu
+          if-no-files-found: error
+          # Hand-off between jobs only; the cleanup job deletes it at the end of
+          # the run. Releases live in R2, never on GitHub.
+          retention-days: 1
+
+  install-smoke:
+    name: install-smoke-${{ matrix.os }}
+    needs: [macos, linux-cpu]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15, ubuntu-22.04, ubuntu-24.04, ubuntu-22.04-arm]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: vakt-*
+          path: artifacts
+          merge-multiple: true
+      - name: Checksums
+        run: |
+          cd artifacts
+          if command -v sha256sum >/dev/null; then sha256sum vakt-* > SHA256SUMS; else shasum -a 256 vakt-* > SHA256SUMS; fi
+          cat SHA256SUMS
+      - name: Dry run
+        run: sh install.sh --dry-run --version v0.0.0 --no-summon
+      - name: Install from artifacts
+        run: |
+          extra=""
+          if [ "$(uname -s)" = Linux ]; then extra="--cpu"; fi
+          # shellcheck disable=SC2086
+          sh install.sh --local artifacts --prefix "$RUNNER_TEMP/p" --yes --no-summon --no-doctor $extra
+          "$RUNNER_TEMP/p/bin/vakt" version
+          "$RUNNER_TEMP/p/bin/vakt" doctor || true
+
+  gpu-parity:
+    name: gpu-parity (self-hosted)
+    # Self-hosted GPU runners never run untrusted code: only pushes and tags
+    # on this repository, and only when the runner is enabled.
+    if: >-
+      github.repository == 'vaktex/vakt' && vars.ENABLE_GPU_RUNNER == 'true' &&
+      (github.event_name == 'push' ||
+       (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'))
+    needs: [linux-cuda]
+    runs-on: [self-hosted, linux, gpu]
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: ${{ !startsWith(github.ref, 'refs/tags/') }}
+      - name: Parity fixtures
+        id: fixtures
+        env:
+          FIXTURES_URL: ${{ vars.PARITY_FIXTURES_URL }}
+          FIXTURES_SHA256: ${{ vars.PARITY_FIXTURES_SHA256 }}
+        run: ./.github/scripts/fetch-fixtures.sh
+      - name: Build native deps and run parity on the GPU
+        if: steps.fixtures.outputs.available == 'true'
+        env:
+          BACKEND: cuda
+        run: |
+          make deps
+          make parity
+          make bench
+
+  release:
+    name: release
+    if: github.repository == 'vaktex/vakt' && startsWith(github.ref, 'refs/tags/v')
+    needs: [lint, macos, linux-cuda, linux-cpu, install-smoke]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    # Publishes to the vakt-releases R2 bucket, which get.vaktex.com/oss-vakt
+    # streams from. Nothing is published to GitHub. See docs/CI.md.
+    environment: release
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: vakt-*
+          path: dist
+          merge-multiple: true
+      - name: Assemble
+        run: |
+          cp install.sh dist/
+          cd dist
+          chmod 0755 vakt-*
+          sha256sum vakt-* install.sh > SHA256SUMS
+          cat SHA256SUMS
+      - name: Publish to R2 (keep the newest 3)
+        env:
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_BUCKET: vakt-releases
+          R2_KEEP: "3"
+        run: |
+          . .github/scripts/version.sh
+          ./.github/scripts/publish-r2.sh publish dist "$VAKT_VERSION"
+
+  cleanup:
+    name: cleanup
+    # Delete this run's binaries from GitHub whatever happened above, so no
+    # build output outlives the run. (retention-days: 1 is the backstop.)
+    if: always()
+    needs: [lint, macos, linux-cuda, linux-cpu, install-smoke, gpu-parity, release]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      actions: write
+    steps:
+      - name: Delete run artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          ids=$(gh api --paginate "repos/$REPO/actions/runs/$RUN_ID/artifacts" --jq '.artifacts[].id')
+          for id in $ids; do
+            echo "delete artifact $id"
+            gh api -X DELETE "repos/$REPO/actions/artifacts/$id"
+          done
