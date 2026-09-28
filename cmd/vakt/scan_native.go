@@ -48,15 +48,29 @@ func nativeScan(ctx context.Context, o ScanOptions, prog *report.Progress) (*rep
 			_ = e.Close() // scan result or error already decided
 		}
 	}()
-	for _, d := range devices {
-		e, err := engine.Open(engine.Options{ModelPath: path, ModelSHA: sha, Precision: o.Precision, Device: o.Device, DeviceIndex: d})
-		if err != nil {
-			return nil, err
+	// VAKT_OPEN_EARLY=1 loads the model and compiles its GPU kernels (with
+	// a warm-up batch) while the pipeline walks, parses and tokenizes,
+	// instead of before it starts. Off by default until measured
+	// (scripts/abbench.sh): one run looked slower, but the same code also
+	// varied by 15% between sessions.
+	early := os.Getenv("VAKT_OPEN_EARLY") == "1"
+	open := func(ctx context.Context) ([]core.Engine, error) {
+		for _, d := range devices {
+			e, err := engine.Open(engine.Options{ModelPath: path, ModelSHA: sha, Precision: o.Precision, Device: o.Device, DeviceIndex: d})
+			if err != nil {
+				return nil, err
+			}
+			engines = append(engines, e)
+			if early {
+				if err := warmUp(ctx, e); err != nil {
+					return nil, err
+				}
+			}
+			if o.Device == "cpu" || e.Info().Backend != "cuda" {
+				break // one engine per GPU; CPU and Metal have a single device
+			}
 		}
-		engines = append(engines, e)
-		if o.Device == "cpu" || e.Info().Backend != "cuda" {
-			break // one engine per GPU; CPU and Metal have a single device
-		}
+		return engines, nil
 	}
 
 	rev := o.ModelRevision
@@ -82,7 +96,25 @@ func nativeScan(ctx context.Context, o ScanOptions, prog *report.Progress) (*rep
 		CacheDir:    hub.ScoresDir(),
 		ModelRepo:   repo, ModelRevision: rev, Precision: o.Precision,
 	}
-	return pipeline.Run(ctx, cfg, engines, tok, prog)
+	if !early {
+		es, err := open(ctx)
+		if err != nil {
+			return nil, err
+		}
+		return pipeline.Run(ctx, cfg, es, tok, prog)
+	}
+	return pipeline.RunOpening(ctx, cfg, open, tok, prog)
+}
+
+// warmUp scores one short sequence so the GPU kernels are compiled before
+// the first real batch.
+func warmUp(ctx context.Context, e core.Engine) error {
+	ids := make([]int32, 64)
+	for i := range ids {
+		ids[i] = int32(1000 + i) // #nosec G115 -- small constants
+	}
+	_, err := e.Score(ctx, [][]int32{ids})
+	return err
 }
 
 // nativeBench loads the cached model and times one forward pass.

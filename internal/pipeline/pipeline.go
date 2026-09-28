@@ -53,6 +53,15 @@ func Run(ctx context.Context, cfg Config, engines []core.Engine, tok core.Tokeni
 	if len(engines) == 0 {
 		return nil, errors.New("pipeline: no engine")
 	}
+	return RunOpening(ctx, cfg, func(context.Context) ([]core.Engine, error) { return engines, nil }, tok, prog)
+}
+
+// RunOpening is Run with the engines opened by open, concurrently with the
+// walk, parse and tokenize stages: loading the model (and warming it up)
+// overlaps with the CPU work that has to happen before the first batch
+// anyway. RunOpening returns only after open has returned; the caller owns
+// (and closes) whatever engines open created, even on error.
+func RunOpening(ctx context.Context, cfg Config, open func(context.Context) ([]core.Engine, error), tok core.Tokenizer, prog *report.Progress) (*report.Report, error) {
 	if prog == nil {
 		prog = &report.Progress{}
 	}
@@ -61,18 +70,6 @@ func Run(ctx context.Context, cfg Config, engines []core.Engine, tok core.Tokeni
 	}
 	if cfg.Jobs <= 0 {
 		cfg.Jobs = 8
-	}
-	info := engines[0].Info()
-	budget := cfg.BatchTokens
-	if bs, ok := engines[0].(core.BatchSizer); ok && (budget <= 0 || bs.MaxBatchTokens() < budget) {
-		budget = bs.MaxBatchTokens()
-	}
-	if budget <= 0 {
-		budget = 4096 // measured: small padded batches beat large ones (less padding, less memory pressure)
-	}
-	maxSeqs := 256
-	if bs, ok := engines[0].(interface{ MaxBatchSeqs() int }); ok && bs.MaxBatchSeqs() > 0 {
-		maxSeqs = bs.MaxBatchSeqs()
 	}
 
 	var cache *Cache
@@ -116,6 +113,22 @@ func Run(ctx context.Context, cfg Config, engines []core.Engine, tok core.Tokeni
 	var all sync.WaitGroup
 	defer all.Wait()
 	defer cancel(nil) // runs first: unblocks everything, then all.Wait
+
+	// 0. Open the engines while the CPU stages run.
+	type openResult struct {
+		engines []core.Engine
+		err     error
+	}
+	opened := make(chan openResult, 1)
+	all.Add(1)
+	go func() {
+		defer all.Done()
+		es, err := open(ctx)
+		if err == nil && len(es) == 0 {
+			err = errors.New("pipeline: no engine")
+		}
+		opened <- openResult{es, err}
+	}()
 
 	// 1. Walk.
 	var walkErr error
@@ -239,8 +252,8 @@ func Run(ctx context.Context, cfg Config, engines []core.Engine, tok core.Tokeni
 	go func() { defer all.Done(); wgTok.Wait(); close(encoded) }()
 
 	// 4. Cache lookup + batching + scoring.
-	modelKey := info.ModelSHA
-	scoreErr := make(chan error, len(engines))
+	var info core.EngineInfo // set by the scoring goroutine once the engines are open
+	scoreErr := make(chan error, 64)
 	// Cache writes are a bbolt transaction with an fsync each (a full
 	// flush on macOS): keep them off the engine goroutines so the device
 	// never waits on the disk. The writer merges whatever has queued.
@@ -273,6 +286,34 @@ func Run(ctx context.Context, cfg Config, engines []core.Engine, tok core.Tokeni
 		defer close(results)
 		if putC != nil {
 			defer close(putC) // after wgEng.Wait below: no more writers
+		}
+		var engines []core.Engine
+		select {
+		case r := <-opened:
+			if r.err != nil {
+				scoreErr <- r.err
+				cancel(r.err)
+			}
+			engines = r.engines
+		case <-ctx.Done():
+		}
+		if ctx.Err() != nil {
+			for range encoded { // drain so the tokenizers can exit
+			}
+			return
+		}
+		info = engines[0].Info()
+		modelKey := info.ModelSHA
+		budget := cfg.BatchTokens
+		if bs, ok := engines[0].(core.BatchSizer); ok && (budget <= 0 || bs.MaxBatchTokens() < budget) {
+			budget = bs.MaxBatchTokens()
+		}
+		if budget <= 0 {
+			budget = 4096 // measured: small padded batches beat large ones (less padding, less memory pressure)
+		}
+		maxSeqs := 256
+		if bs, ok := engines[0].(interface{ MaxBatchSeqs() int }); ok && bs.MaxBatchSeqs() > 0 {
+			maxSeqs = bs.MaxBatchSeqs()
 		}
 		b := newBatcher(budget, maxSeqs)
 		work := make(chan []core.Encoded, len(engines))
