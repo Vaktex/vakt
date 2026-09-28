@@ -65,6 +65,7 @@ type weights struct {
 	heads   bool
 	all     []*mlx.Array
 	compute mlx.DType
+	q8      map[*mlx.Array]q8w // int8 copies of the backbone matmul weights (--precision int8)
 }
 
 type layerW struct {
@@ -91,7 +92,7 @@ type layerW struct {
 // loadWeights builds compute-layout weights from raw tensors. prefix is
 // "backbone." (published model) or "model.language_model." (base model; no
 // heads). Raw arrays are released as they are consumed.
-func loadWeights(x *mlx.Ctx, raw map[string]*mlx.Array, prefix string, compute mlx.DType, heads bool) (*weights, error) {
+func loadWeights(x *mlx.Ctx, raw map[string]*mlx.Array, prefix string, compute mlx.DType, heads, int8 bool) (*weights, error) {
 	var used []string // raw tensors consumed since the last materialise
 	if raw["binary_head.weight"] != nil && raw["pool.query"] == nil {
 		return nil, errors.New("engine: this checkpoint uses the pre-release head layout (mean pool + linear heads); this version of vakt needs the published DOM-0.8B (attention pool + MLP heads)")
@@ -105,7 +106,7 @@ func loadWeights(x *mlx.Ctx, raw map[string]*mlx.Array, prefix string, compute m
 		used = append(used, name)
 		return a
 	}
-	w := &weights{compute: compute}
+	w := &weights{compute: compute, q8: map[*mlx.Array]q8w{}}
 	// materialise evaluates the weights built so far and releases the raw
 	// tensors they came from, so peak memory is the laid-out model plus one
 	// layer's raw tensors rather than twice the model (a 3 GB fp32
@@ -145,6 +146,15 @@ func loadWeights(x *mlx.Ctx, raw map[string]*mlx.Array, prefix string, compute m
 		}
 		return x.Contiguous(x.Transpose(cast(cat), 1, 0))
 	}
+	// mm keeps a backbone matmul weight and, in int8 mode, its int8 copy.
+	mm := func(a *mlx.Array) *mlx.Array {
+		a = keep(a)
+		if int8 {
+			q := quantizeWeight(x, a)
+			w.q8[a] = q8w{q: keep(q.q), s: keep(q.s)}
+		}
+		return a
+	}
 	p := prefix
 	w.embed = keep(x.Contiguous(cast(get(p + "embed_tokens.weight"))))
 	w.norm = keep(onePlus(get(p + "norm.weight")))
@@ -153,18 +163,18 @@ func loadWeights(x *mlx.Ctx, raw map[string]*mlx.Array, prefix string, compute m
 		L := layerW{
 			inNorm:   keep(onePlus(get(lp + "input_layernorm.weight"))),
 			postNorm: keep(onePlus(get(lp + "post_attention_layernorm.weight"))),
-			gateUp:   keep(lin(lp+"mlp.gate_proj.weight", lp+"mlp.up_proj.weight")),
-			down:     keep(lin(lp + "mlp.down_proj.weight")),
+			gateUp:   mm(lin(lp+"mlp.gate_proj.weight", lp+"mlp.up_proj.weight")),
+			down:     mm(lin(lp + "mlp.down_proj.weight")),
 		}
 		if isFull(i) {
 			a := lp + "self_attn."
-			L.qkv = keep(lin(a+"q_proj.weight", a+"k_proj.weight", a+"v_proj.weight"))
+			L.qkv = mm(lin(a+"q_proj.weight", a+"k_proj.weight", a+"v_proj.weight"))
 			L.qNorm = keep(onePlus(get(a + "q_norm.weight")))
 			L.kNorm = keep(onePlus(get(a + "k_norm.weight")))
-			L.o = keep(lin(a + "o_proj.weight"))
+			L.o = mm(lin(a + "o_proj.weight"))
 		} else {
 			a := lp + "linear_attn."
-			L.inProj = keep(lin(a+"in_proj_qkv.weight", a+"in_proj_z.weight", a+"in_proj_b.weight", a+"in_proj_a.weight"))
+			L.inProj = mm(lin(a+"in_proj_qkv.weight", a+"in_proj_z.weight", a+"in_proj_b.weight", a+"in_proj_a.weight"))
 			// PyTorch depthwise conv weight [C, 1, K] -> K contiguous [C] taps.
 			cw := cast(get(a + "conv1d.weight"))
 			for k := 0; k < convKernel; k++ {
@@ -175,7 +185,7 @@ func loadWeights(x *mlx.Ctx, raw map[string]*mlx.Array, prefix string, compute m
 			L.aLogNeg = keep(x.Negative(x.Exp(f32(get(a + "A_log")))))
 			L.dtBias = keep(f32(get(a + "dt_bias")))
 			L.gnorm = keep(f32(get(a + "norm.weight")))
-			L.outProj = keep(lin(a + "out_proj.weight"))
+			L.outProj = mm(lin(a + "out_proj.weight"))
 		}
 		w.layers = append(w.layers, L)
 		if err := materialise(); err != nil {
@@ -259,9 +269,10 @@ type model struct {
 	w         *weights
 	cancelled func() bool // checked between layers
 	delta     deltaMode
-	kern      *kernels  // fused Metal kernels (nil off Metal)
-	evalEvery int       // materialise the residual every N layers (0 = one graph)
-	prof      *profiler // per-stage timing (VAKT_PROFILE=1), nil otherwise
+	kern      *kernels     // fused Metal kernels (nil off Metal)
+	i8        *int8Kernels // int8 GEMM (--precision int8 only)
+	evalEvery int          // materialise the residual every N layers (0 = one graph)
+	prof      *profiler    // per-stage timing (VAKT_PROFILE=1), nil otherwise
 }
 
 // forward returns the float32 last hidden state after the final norm,
@@ -353,10 +364,10 @@ func (m *model) rmsNorm(x *mlx.Ctx, h, scale *mlx.Array) *mlx.Array {
 }
 
 func (m *model) mlp(x *mlx.Ctx, h *mlx.Array, L layerW, B, T int) *mlx.Array {
-	gu := m.prof.mark(x, "mlp.gate_up", x.Matmul(h, L.gateUp)) // [B, T, 2I]
+	gu := m.prof.mark(x, "mlp.gate_up", m.matmul(x, h, L.gateUp)) // [B, T, 2I]
 	if m.kern != nil {
 		a := m.prof.mark(x, "mlp.act", m.kern.swigluOp(x, gu, B, T))
-		return m.prof.mark(x, "mlp.down", x.Matmul(a, L.down))
+		return m.prof.mark(x, "mlp.down", m.matmul(x, a, L.down))
 	}
 	parts := x.SplitAt(gu, -1, intermediate)
 	return x.Matmul(x.Multiply(x.Silu(parts[0]), parts[1]), L.down)
@@ -365,7 +376,7 @@ func (m *model) mlp(x *mlx.Ctx, h *mlx.Array, L layerW, B, T int) *mlx.Array {
 // attention is gated attention: sigmoid-gated output, q/k RMSNorm per head, partial
 // RoPE (first 64 of 256 dims, rotate_half), GQA, causal.
 func (m *model) attention(x *mlx.Ctx, h *mlx.Array, L layerW, B, T int) *mlx.Array {
-	proj := m.prof.mark(x, "attn.qkv", x.Matmul(h, L.qkv)) // [B, T, 4096+512+512]
+	proj := m.prof.mark(x, "attn.qkv", m.matmul(x, h, L.qkv)) // [B, T, 4096+512+512]
 	if m.kern != nil {
 		// Metal: one kernel norms, rotates and lays out q/k/v; one applies
 		// the gate while undoing SDPA's head-major layout.
@@ -373,7 +384,7 @@ func (m *model) attention(x *mlx.Ctx, h *mlx.Array, L layerW, B, T int) *mlx.Arr
 		m.prof.mark(x, "attn.norm_rope", q)
 		o := m.prof.mark(x, "attn.sdpa", blockedCausalSDPA(x, q, k, v, float32(1/math.Sqrt(headDim)), B, T))
 		o = m.prof.mark(x, "attn.gate", m.kern.attnGateOp(x, o, proj, B, T))
-		return m.prof.mark(x, "attn.o", x.Matmul(o, L.o))
+		return m.prof.mark(x, "attn.o", m.matmul(x, o, L.o))
 	}
 	p := x.SplitAt(proj, -1, attnHeads*headDim*2, attnHeads*headDim*2+kvHeads*headDim)
 	// q_proj output is viewed as [.., heads, 2*head_dim] then chunked: the
@@ -440,14 +451,14 @@ func (m *model) linearAttention(x *mlx.Ctx, h, mask *mlx.Array, L layerW, length
 	// On the fused path the padding mask is skipped: sequences are
 	// right-padded and every mixer is causal, so padded positions never
 	// reach a real one, and pooling masks them out.
-	proj := m.prof.mark(x, "lin.in_proj", x.Matmul(h, L.inProj)) // [B, T, 6144+2048+16+16]
+	proj := m.prof.mark(x, "lin.in_proj", m.matmul(x, h, L.inProj)) // [B, T, 6144+2048+16+16]
 	if m.delta == deltaKernel && m.kern != nil {
 		// Metal: three fused kernels read their columns of proj in place.
 		conv := m.prof.mark(x, "lin.conv", m.kern.convSilu(x, proj, L.convTapsKC, B, T))
 		scal := m.prof.mark(x, "lin.delta_prep", m.kern.deltaPrep(x, conv, proj, L, B, T))
 		core := m.prof.mark(x, "lin.delta", m.kern.gatedDelta(x, conv, scal, B, T))
 		o := m.prof.mark(x, "lin.gated_norm", m.kern.gatedNorm(x, core, proj, L.gnorm, h.Dtype(), B, T))
-		return m.prof.mark(x, "lin.out_proj", x.Matmul(o, L.outProj))
+		return m.prof.mark(x, "lin.out_proj", m.matmul(x, o, L.outProj))
 	}
 	p := x.SplitAt(proj, -1, linQKVDim, linQKVDim+linValueWidth, linQKVDim+linValueWidth+linHeads)
 	mixed, z, bb, aa := p[0], p[1], p[2], p[3]

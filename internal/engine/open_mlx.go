@@ -40,9 +40,9 @@ func open(opts Options) (core.Engine, error) {
 		prec = "fp32"
 	}
 	switch prec {
-	case "fp32", "tf32", "bf16", "fp16", "auto":
+	case "fp32", "tf32", "bf16", "fp16", "int8", "auto":
 	default:
-		return nil, fmt.Errorf("engine: precision must be auto, fp32, tf32, bf16 or fp16, got %q", prec)
+		return nil, fmt.Errorf("engine: precision must be auto, fp32, tf32, bf16, fp16 or int8, got %q", prec)
 	}
 
 	// 1. The file is untrusted: validate its header before MLX parses it.
@@ -100,6 +100,10 @@ func open(opts Options) (core.Engine, error) {
 	if prec == "auto" {
 		prec = autoPrecision(backend)
 	}
+	if prec == "int8" && backend != "metal" {
+		s.Free()
+		return nil, fmt.Errorf("%w: --precision int8 needs an Apple GPU with Metal 4 tensor ops (M5 class); this device is %s", ErrUnavailable, backend)
+	}
 
 	// MLX reads MLX_ENABLE_TF32 once per process, so the matmul mode is fixed
 	// by the first engine; a later engine asking for another mode is refused
@@ -132,13 +136,14 @@ func open(opts Options) (core.Engine, error) {
 	switch prec {
 	case "bf16":
 		compute = mlx.BFloat16
-	case "fp16":
+	case "fp16", "int8":
 		// IEEE half: the format Apple's GPU matmul units (M5 and later)
 		// run natively. Same layout as bf16 (f32 residual, norms, state,
 		// pool and heads) but a narrower range, so check parity first.
+		// int8 is fp16 with the backbone matmuls in int8 (int8.go).
 		compute = mlx.Float16
 	}
-	w, err := loadWeights(x, raw, prefix, compute, heads)
+	w, err := loadWeights(x, raw, prefix, compute, heads, prec == "int8")
 	if err != nil {
 		s.Free()
 		return nil, err
@@ -152,6 +157,16 @@ func open(opts Options) (core.Engine, error) {
 	}
 	if backend == "metal" && os.Getenv("VAKT_DELTANET") == "" {
 		m.delta, m.kern = deltaKernel, newKernels()
+	}
+	if prec == "int8" {
+		m.i8 = newInt8Kernels()
+		if err := probeInt8(s, m.i8); err != nil {
+			m.i8.free()
+			m.kern.free()
+			w.free()
+			s.Free()
+			return nil, fmt.Errorf("%w: --precision int8 needs Metal 4 tensor ops (an M5-class GPU on macOS 26): %v", ErrUnavailable, err)
+		}
 	}
 	return &mlxEngine{
 		s: s, m: m, maxBT: maxBatchTokens(backend),
@@ -184,6 +199,7 @@ func (e *mlxEngine) Close() error {
 		e.m.prof.report(os.Stderr, e.info.Backend+" "+e.info.Device+" "+e.info.Precision)
 		e.m.w.free()
 		e.m.kern.free()
+		e.m.i8.free()
 		e.m = nil
 	}
 	e.s.Free()

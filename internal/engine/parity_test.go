@@ -5,6 +5,7 @@ package engine
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"math"
 	"os"
 	"path/filepath"
@@ -497,8 +498,12 @@ func TestParityRelease(t *testing.T) {
 	for _, tc := range []struct {
 		prec string
 		tol  float64
-	}{{"fp32", 1e-4}, {"bf16", 2e-2}, {"fp16", 2e-2}} {
+	}{{"fp32", 1e-4}, {"bf16", 2e-2}, {"fp16", 2e-2}, {"int8", 5e-2}} {
 		e, err := Open(Options{ModelPath: p, Precision: tc.prec, Device: testDevice()})
+		if tc.prec == "int8" && errors.Is(err, ErrUnavailable) {
+			t.Logf("int8: %v", err)
+			continue
+		}
 		if err != nil {
 			t.Fatal(err)
 		}

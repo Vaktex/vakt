@@ -24,6 +24,7 @@ func (x *Ctx) Subtract(a, b *Array) *Array { return x.binary("subtract", fSub, a
 func (x *Ctx) Multiply(a, b *Array) *Array { return x.binary("multiply", fMul, a, b) }
 func (x *Ctx) Divide(a, b *Array) *Array   { return x.binary("divide", fDiv, a, b) }
 func (x *Ctx) Maximum(a, b *Array) *Array  { return x.binary("maximum", fMax, a, b) }
+func (x *Ctx) Minimum(a, b *Array) *Array  { return x.binary("minimum", fMin, a, b) }
 func (x *Ctx) Matmul(a, b *Array) *Array   { return x.binary("matmul", fMatmul, a, b) }
 func (x *Ctx) Less(a, b *Array) *Array     { return x.binary("less", fLess, a, b) }
 func (x *Ctx) Greater(a, b *Array) *Array  { return x.binary("greater", fGreater, a, b) }
@@ -40,6 +41,35 @@ func (x *Ctx) Log1p(a *Array) *Array    { return x.unary("log1p", fLog1p, a) }
 func (x *Ctx) Sigmoid(a *Array) *Array  { return x.unary("sigmoid", fSigmoid, a) }
 func (x *Ctx) Negative(a *Array) *Array { return x.unary("negative", fNeg, a) }
 func (x *Ctx) Square(a *Array) *Array   { return x.unary("square", fSquare, a) }
+func (x *Ctx) Abs(a *Array) *Array      { return x.unary("abs", fAbs, a) }
+
+// Round rounds half to even.
+func (x *Ctx) Round(a *Array) *Array {
+	if !x.ok("round", a) {
+		return x.empty()
+	}
+	res := C.mlx_array_new()
+	if !x.check("round", C.mlx_round(&res, a.c, 0, x.S.c)) {
+		C.mlx_array_free(res)
+		return x.empty()
+	}
+	return x.track(res)
+}
+
+// Max reduces with max over axes.
+func (x *Ctx) Max(a *Array, keepdims bool, axes ...int) *Array {
+	if !x.ok("max", a) {
+		return x.empty()
+	}
+	ap, an := cInts(axes)
+	defer freeInts(ap)
+	res := C.mlx_array_new()
+	if !x.check("max", C.mlx_max_axes(&res, a.c, ap, an, C.bool(keepdims), x.S.c)) {
+		C.mlx_array_free(res)
+		return x.empty()
+	}
+	return x.track(res)
+}
 
 func (x *Ctx) Erf(a *Array) *Array { return x.unary("erf", fErf, a) }
 
@@ -486,6 +516,9 @@ func fDiv(r *C.mlx_array, a, b C.mlx_array, s C.mlx_stream) C.int { return C.mlx
 func fMax(r *C.mlx_array, a, b C.mlx_array, s C.mlx_stream) C.int {
 	return C.mlx_maximum(r, a, b, s)
 }
+func fMin(r *C.mlx_array, a, b C.mlx_array, s C.mlx_stream) C.int {
+	return C.mlx_minimum(r, a, b, s)
+}
 func fMatmul(r *C.mlx_array, a, b C.mlx_array, s C.mlx_stream) C.int {
 	return C.mlx_matmul(r, a, b, s)
 }
@@ -506,3 +539,4 @@ func fSigmoid(r *C.mlx_array, a C.mlx_array, s C.mlx_stream) C.int { return C.ml
 func fErf(r *C.mlx_array, a C.mlx_array, s C.mlx_stream) C.int     { return C.mlx_erf(r, a, s) }
 func fNeg(r *C.mlx_array, a C.mlx_array, s C.mlx_stream) C.int     { return C.mlx_negative(r, a, s) }
 func fSquare(r *C.mlx_array, a C.mlx_array, s C.mlx_stream) C.int  { return C.mlx_square(r, a, s) }
+func fAbs(r *C.mlx_array, a C.mlx_array, s C.mlx_stream) C.int     { return C.mlx_abs(r, a, s) }

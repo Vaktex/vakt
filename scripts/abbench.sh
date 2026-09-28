@@ -12,10 +12,10 @@
 # dropped 15-25% after the first minute of back-to-back scans), which
 # otherwise swamps differences of a few percent.
 #
-# CONFIG is a space-separated list of environment assignments, or - for the
-# defaults. Example:
+# CONFIG is a space-separated list of environment assignments and vakt flags
+# (words starting with -), or - for the defaults. Example:
 #
-#   scripts/abbench.sh -n 5 - VAKT_CONV_STEPS=4 VAKT_OPEN_EARLY=1
+#   scripts/abbench.sh -n 5 - VAKT_CONV_STEPS=4 --precision=int8
 set -eu
 
 rounds=5
@@ -43,13 +43,21 @@ tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 
 run() { # config -> tok/s
-	cfg=$1
-	[ "$cfg" = - ] && cfg=
+	cfg=
+	flags=
+	if [ "$1" != - ]; then
+		for word in $1; do
+			case "$word" in
+			-*) flags="$flags $word" ;;
+			*) cfg="$cfg $word" ;;
+			esac
+		done
+	fi
 	[ "$cool" -gt 0 ] && sleep "$cool"
 	rm -f "$tmp/r.json"
 	rc=0
 	# shellcheck disable=SC2086 # CONFIG and args are deliberately word-split
-	env $cfg "$bin" "$path" $args --no-cache -q --format json -o "$tmp/r.json" >/dev/null 2>"$tmp/err" || rc=$?
+	env $cfg "$bin" "$path" $args $flags --no-cache -q --format json -o "$tmp/r.json" >/dev/null 2>"$tmp/err" || rc=$?
 	# Exit status 1 only means findings were reported.
 	if [ "$rc" -gt 1 ] || [ ! -s "$tmp/r.json" ]; then
 		echo "vakt failed for config '$1' (exit $rc):" >&2

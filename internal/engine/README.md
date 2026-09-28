@@ -30,6 +30,10 @@ The mRoPE sections reduce to 1D RoPE for text-only input: all three position row
 | `bf16` | bf16 matmul inputs | bf16 | max\|Δs\| 1.0e-2, batch invariance 2.7e-3 | ~9k tok/s |
 | `fp16` (`auto` on Metal) | f16 matmul inputs | f16 (native on M5-class matmul units) | release weights: max\|Δs\| 1.3e-3, max\|Δp\| 1.3e-3 (bf16 on the same fixtures: 1.2e-2) | M5 Pro real scan: 10.9k tok/s vs 9.7k tf32, 11.5k bf16 |
 
+| `int8` (opt-in, Metal 4 / M5 class) | int8 backbone matmuls (per-token activation, per-channel weight scales), fp16 elsewhere | int8 × int8 → int32 (`int8.go`) | see `TestParityRelease` | gate\|up GEMM 45.3 vs 26.0 TFLOPS (fp16), down 39.3 vs 22.9 (`BenchmarkInt8Gemm`, M5 Pro) |
+
+MLX 0.31 has no int8 matmul on Metal (`matmul` rejects integer types and `qqmm` is not implemented beyond one row), so `int8` uses vakt's own GEMM on Metal 4 tensor ops (`mpp::tensor_ops::matmul2d`), with a fused scale epilogue, and a per-row activation quantizer. Weights get int8 copies at load, one scale per output channel. `Open` runs a small self-test and refuses `int8` where the tensor ops are missing.
+
 In every mode the residual stream, norms, the DeltaNet state, pooling and the heads run in f32. The bf16 checkpoint layout (bf16 backbone, f32 heads) loads in every mode.
 
 MLX fixes the matmul mode (TF32 or not) once per process, so one process can't mix `fp32` and `tf32` engines. `Open` refuses the second one.

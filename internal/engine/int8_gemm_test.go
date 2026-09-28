@@ -2,13 +2,7 @@
 
 package engine
 
-// Prototype: an int8 x int8 -> int32 GEMM on the M5-class GPU matmul units
-// (Metal 4 tensor ops, the API MLX's NAX kernels and llama.cpp use), with a
-// fused epilogue that applies per-row activation scales and per-column weight
-// scales and writes fp16. MLX 0.31 has no int8 matmul on Metal (matmul
-// rejects integer types and qqmm is "NYI for the general case"), so this is
-// the only way to try int8 compute. It lives in a test until the benchmark
-// below says it beats MLX's fp16 matmul.
+// Tests and benchmarks for the int8 GEMM (int8.go) behind --precision int8.
 //
 //	go test -tags mlx -run Int8Gemm -bench Int8Gemm -benchtime 20x -v ./internal/engine
 
@@ -22,54 +16,6 @@ import (
 	"github.com/vaktex/vakt/internal/engine/mlx"
 )
 
-const int8GemmHeader = `
-#include <metal_tensor>
-#include <MetalPerformancePrimitives/MetalPerformancePrimitives.h>
-`
-
-// int8GemmSource computes y[m,n] = half(sx[m] * sw[n] * sum_k x[m,k]*w[n,k])
-// for int8 x [M,K], w [N,K] (both K-contiguous), float32 sx [M], sw [N].
-// One threadgroup of NSG SIMD groups per TM x TN output tile; the matmul op
-// streams K from device memory itself. The int32 tile goes through
-// threadgroup memory for the epilogue.
-const int8GemmSource = `
-    const uint tid = thread_index_in_threadgroup;
-    const int M = x_shape[0];
-    const int K = x_shape[1];
-    const int N = w_shape[0];
-    const int m0 = int(threadgroup_position_in_grid.y) * TM;
-    const int n0 = int(threadgroup_position_in_grid.x) * TN;
-    if (m0 >= M || n0 >= N) { return; }
-
-    auto tX = metal::tensor((device int8_t*)(x + size_t(m0) * K),
-        metal::dextents<int32_t, 2>(K, metal::min(TM, M - m0)), metal::array<int, 2>({1, K}));
-    auto tW = metal::tensor((device int8_t*)(w + size_t(n0) * K),
-        metal::dextents<int32_t, 2>(K, metal::min(TN, N - n0)), metal::array<int, 2>({1, K}));
-
-    mpp::tensor_ops::matmul2d<
-        mpp::tensor_ops::matmul2d_descriptor(TM, TN, static_cast<int>(metal::dynamic_extent), false, true, false,
-            mpp::tensor_ops::matmul2d_descriptor::mode::multiply),
-        metal::execution_simdgroups<NSG>> mm;
-    auto cT = mm.template get_destination_cooperative_tensor<decltype(tX), decltype(tW), int32_t>();
-    mm.run(tX, tW, cT);
-
-    threadgroup int32_t sc[TM * TN];
-    auto tS = metal::tensor<threadgroup int32_t, metal::dextents<int32_t, 2>, metal::tensor_inline>(
-        sc, metal::dextents<int32_t, 2>(TN, TM));
-    cT.store(tS);
-    metal::threadgroup_barrier(metal::mem_flags::mem_threadgroup);
-
-    for (int i = int(tid); i < TM * TN; i += NSG * 32) {
-        const int r = i / TN;
-        const int c = i % TN;
-        const int m = m0 + r;
-        const int n = n0 + c;
-        if (m < M && n < N) {
-            y[size_t(m) * N + n] = static_cast<half>(float(sc[i]) * sx[m] * sw[n]);
-        }
-    }
-`
-
 type int8GemmCfg struct{ TM, TN, NSG int }
 
 func (c int8GemmCfg) String() string { return fmt.Sprintf("tile%dx%d_sg%d", c.TM, c.TN, c.NSG) }
@@ -77,13 +23,8 @@ func (c int8GemmCfg) String() string { return fmt.Sprintf("tile%dx%d_sg%d", c.TM
 // The int32 tile lives in threadgroup memory (32 KB max): TM*TN <= 8192.
 var int8GemmCfgs = []int8GemmCfg{{64, 64, 4}, {64, 64, 8}, {128, 64, 4}, {64, 128, 4}}
 
-func int8Gemm(x *mlx.Ctx, k *mlx.Kernel, c int8GemmCfg, xq, wq, sx, sw *mlx.Array, M, N int) *mlx.Array {
-	return x.Apply(k, []*mlx.Array{xq, wq, sx, sw}, mlx.KernelLaunch{
-		Grid:         [3]int{(N + c.TN - 1) / c.TN * 32 * c.NSG, (M + c.TM - 1) / c.TM, 1},
-		ThreadGroup:  [3]int{32 * c.NSG, 1, 1},
-		Outputs:      []mlx.KernelOutput{{Shape: []int{M, N}, Dtype: mlx.Float16}},
-		TemplateInts: map[string]int{"TM": c.TM, "TN": c.TN, "NSG": c.NSG},
-	})[0]
+func int8Gemm(x *mlx.Ctx, k *int8Kernels, c int8GemmCfg, xq, wq, sx, sw *mlx.Array, M, N int) *mlx.Array {
+	return k.gemmTile(x, xq, sx, q8w{q: wq, s: sw}, M, N, mlx.Float16, c.TM, c.TN, c.NSG)
 }
 
 // int8Inputs makes random int8 operands (values in [-127, 127]) and scales.
@@ -122,8 +63,8 @@ func needNAX(t testing.TB) *mlx.Stream {
 func TestInt8GemmCorrect(t *testing.T) {
 	s := needNAX(t)
 	defer s.Free()
-	k := mlx.NewKernel("vakt_int8_gemm_proto", []string{"x", "w", "sx", "sw"}, []string{"y"}, int8GemmSource, int8GemmHeader)
-	defer k.Free()
+	k := newInt8Kernels()
+	defer k.free()
 	const M, K, N = 200, 320, 136
 	x := mlx.NewCtx(s)
 	defer x.Free()
@@ -158,8 +99,8 @@ func TestInt8GemmCorrect(t *testing.T) {
 func BenchmarkInt8Gemm(b *testing.B) {
 	s := needNAX(b)
 	defer s.Free()
-	k := mlx.NewKernel("vakt_int8_gemm_proto", []string{"x", "w", "sx", "sw"}, []string{"y"}, int8GemmSource, int8GemmHeader)
-	defer k.Free()
+	k := newInt8Kernels()
+	defer k.free()
 	for _, sh := range []struct {
 		name    string
 		M, K, N int
@@ -198,5 +139,40 @@ func BenchmarkInt8Gemm(b *testing.B) {
 			run("int8_"+c.String(), func(y *mlx.Ctx) *mlx.Array { return int8Gemm(y, k, c, xq, wq, sx, sw, sh.M, sh.N) })
 		}
 		x.Free()
+	}
+}
+
+// TestQuantizeWeight checks the load-time weight quantization on any device:
+// per output channel, every dequantized weight is within half a step.
+func TestQuantizeWeight(t *testing.T) {
+	s := mlx.TestStream()
+	defer s.Free()
+	x := mlx.NewCtx(s)
+	defer x.Free()
+	const K, N = 96, 40
+	r := rand.New(rand.NewSource(3)) // #nosec G404 -- test data
+	wv := make([]float32, K*N)
+	for i := range wv {
+		wv[i] = float32(r.NormFloat64()) * float32(1+i%N) * 0.01
+	}
+	q := quantizeWeight(x, x.FromFloat32(wv, K, N)) // [K,N] -> q [N,K], s [N]
+	qv, err := x.Float32s(x.AsType(q.q, mlx.Float32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	sv, err := x.Float32s(q.s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for n := 0; n < N; n++ {
+		for k := 0; k < K; k++ {
+			got := qv[n*K+k] * sv[n]
+			if d := math.Abs(float64(got - wv[k*N+n])); d > float64(sv[n])/2+1e-7 {
+				t.Fatalf("w[%d,%d] = %v, dequantized %v (scale %v)", k, n, wv[k*N+n], got, sv[n])
+			}
+			if qv[n*K+k] < -127 || qv[n*K+k] > 127 {
+				t.Fatalf("q out of range: %v", qv[n*K+k])
+			}
+		}
 	}
 }
