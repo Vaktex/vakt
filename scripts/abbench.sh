@@ -5,7 +5,12 @@
 # tok/s of each. A single run per build is not enough: the same binary has
 # varied by 15% between sessions.
 #
-#   scripts/abbench.sh [-n rounds] [-p path] [-b binary] [-a "vakt args"] CONFIG...
+#   scripts/abbench.sh [-n rounds] [-c cooldown] [-p path] [-b binary] [-a "vakt args"] CONFIG...
+#
+# -c waits that many seconds before every run so each starts from the same
+# thermal state: laptops throttle the GPU under sustained load (an M5 Pro
+# dropped 15-25% after the first minute of back-to-back scans), which
+# otherwise swamps differences of a few percent.
 #
 # CONFIG is a space-separated list of environment assignments, or - for the
 # defaults. Example:
@@ -17,14 +22,16 @@ rounds=5
 path=.
 bin=./bin/vakt
 args=
-while getopts n:p:b:a: opt; do
+cool=0
+while getopts n:c:p:b:a: opt; do
 	case "$opt" in
 	n) rounds=$OPTARG ;;
+	c) cool=$OPTARG ;;
 	p) path=$OPTARG ;;
 	b) bin=$OPTARG ;;
 	a) args=$OPTARG ;;
 	*)
-		echo "usage: $0 [-n rounds] [-p path] [-b binary] [-a \"vakt args\"] CONFIG..." >&2
+		echo "usage: $0 [-n rounds] [-c cooldown] [-p path] [-b binary] [-a \"vakt args\"] CONFIG..." >&2
 		exit 2
 		;;
 	esac
@@ -38,6 +45,7 @@ trap 'rm -rf "$tmp"' EXIT
 run() { # config -> tok/s
 	cfg=$1
 	[ "$cfg" = - ] && cfg=
+	[ "$cool" -gt 0 ] && sleep "$cool"
 	rm -f "$tmp/r.json"
 	rc=0
 	# shellcheck disable=SC2086 # CONFIG and args are deliberately word-split
