@@ -162,7 +162,7 @@ jobs:
 
 | Option | Meaning |
 |---|---|
-| `--precision auto\|fp32\|tf32\|bf16\|fp16\|int8` | `auto` (default) is `fp16` on Apple GPUs, `tf32` on NVIDIA and `fp32` on CPU; `fp32` is exact; `fp16` and `tf32` move scores by ~1e-3 and `bf16` by ~1e-2 for GPU speed; `int8` (M5-class Apple GPUs, opt-in) runs the backbone matmuls in int8, ~1.7× faster matmuls, larger drift |
+| `--precision auto\|fp32\|tf32\|bf16\|fp16` | `auto` (default) is `fp16` on Apple GPUs, `tf32` on NVIDIA and `fp32` on CPU; `fp32` is exact; `fp16` and `tf32` move scores by ~1e-3 and `bf16` by ~1e-2 for GPU speed |
 | `--include`, `--exclude` | doublestar globs, repeatable |
 | `--top-level` | also score code outside functions (imports, globals); these fragments score less reliably |
 | `--no-repo-ignores` | ignore the scanned tree's `.gitignore`/`.vaktignore` |

@@ -74,7 +74,7 @@ type ScanOptions struct {
 	ModelPath     string // a local model.safetensors
 	ModelRepo     string // Hugging Face repo id, e.g. vaktex/dom-oss-0.8b
 	ModelRevision string // branch, tag or commit (default "main")
-	Precision     string // "auto", "fp32", "tf32", "bf16", "fp16" or "int8"
+	Precision     string // "auto", "fp32", "tf32", "bf16" or "fp16" ("int8": experimental, VAKT_EXPERIMENTAL=1)
 	Device        string // "auto", "gpu" or "cpu"
 	Devices       []int  // GPU indices; empty means the engine's default
 
@@ -132,7 +132,7 @@ func newPatrolCmd() *cobra.Command {
 	f.BoolVar(&o.NoCache, "no-cache", false, "don't read or write the score cache")
 	f.StringVar(&o.Model, "model", defaultModel, "a local model.safetensors path, or hf:owner/name[@revision]")
 	f.StringVar(&o.ModelRevision, "revision", "", "model revision (overrides @revision in --model)")
-	f.StringVar(&o.Precision, "precision", defaultPrecision, "compute precision: auto (fp16 on Metal, tf32 on CUDA, fp32 on CPU), fp32 (exact), tf32, bf16, fp16, or int8 (int8 matmuls; M5-class Apple GPUs; larger score drift)")
+	f.StringVar(&o.Precision, "precision", defaultPrecision, "compute precision: auto (fp16 on Metal, tf32 on CUDA, fp32 on CPU), fp32 (exact), tf32, bf16 or fp16")
 	f.StringVar(&o.Device, "device", "auto", "device: auto, gpu or cpu")
 	f.StringVar(&devices, "devices", "", "comma-separated GPU indices to use (e.g. 0,1)")
 	f.Int64Var(&o.MaxFileBytes, "max-file-bytes", defaultMaxFileBytes, "skip files larger than this")
@@ -182,9 +182,16 @@ func (o *ScanOptions) finish(devices string, outSet, revisionSet bool) error {
 		return errors.New("--max-file-bytes must be positive")
 	}
 	switch o.Precision {
-	case "auto", "fp32", "tf32", "bf16", "fp16", "int8":
+	case "auto", "fp32", "tf32", "bf16", "fp16":
+	case "int8":
+		// Experimental: plain per-token int8 moves scores by up to 0.14
+		// on the release fixtures (TestInt8Sensitivity). Hidden until
+		// calibrated (SmoothQuant) int8 is accurate enough.
+		if os.Getenv("VAKT_EXPERIMENTAL") != "1" {
+			return fmt.Errorf("--precision must be auto, fp32, tf32, bf16 or fp16 (got %q)", o.Precision)
+		}
 	default:
-		return fmt.Errorf("--precision must be auto, fp32, tf32, bf16, fp16 or int8 (got %q)", o.Precision)
+		return fmt.Errorf("--precision must be auto, fp32, tf32, bf16 or fp16 (got %q)", o.Precision)
 	}
 	switch o.Device {
 	case "auto", "gpu", "cpu":
