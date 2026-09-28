@@ -48,12 +48,11 @@ func nativeScan(ctx context.Context, o ScanOptions, prog *report.Progress) (*rep
 			_ = e.Close() // scan result or error already decided
 		}
 	}()
-	// VAKT_OPEN_EARLY=1 loads the model and compiles its GPU kernels (with
-	// a warm-up batch) while the pipeline walks, parses and tokenizes,
-	// instead of before it starts. Off by default until measured
-	// (scripts/abbench.sh): one run looked slower, but the same code also
-	// varied by 15% between sessions.
-	early := os.Getenv("VAKT_OPEN_EARLY") == "1"
+	// The model loads, and its GPU kernels compile on a warm-up batch,
+	// while the pipeline walks, parses and tokenizes, instead of before it
+	// starts (scripts/abbench.sh on an M5 Pro: faster in every round, +3.6%
+	// on average). VAKT_OPEN_EARLY=0 opens first.
+	early := os.Getenv("VAKT_OPEN_EARLY") != "0"
 	open := func(ctx context.Context) ([]core.Engine, error) {
 		for _, d := range devices {
 			e, err := engine.Open(engine.Options{ModelPath: path, ModelSHA: sha, Precision: o.Precision, Device: o.Device, DeviceIndex: d})
