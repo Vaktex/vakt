@@ -48,6 +48,7 @@ type DType int
 
 const (
 	Bool     DType = C.MLX_BOOL
+	Int8     DType = C.MLX_INT8
 	Int32    DType = C.MLX_INT32
 	Float16  DType = C.MLX_FLOAT16
 	Float32  DType = C.MLX_FLOAT32
@@ -60,6 +61,8 @@ func (d DType) String() string {
 		return "bool"
 	case Int32:
 		return "int32"
+	case Int8:
+		return "int8"
 	case Float16:
 		return "float16"
 	case Float32:
