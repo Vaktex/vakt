@@ -33,9 +33,10 @@ const (
 	defaultPrecision    = "auto"
 	defaultMaxFileBytes = 2 << 20
 	defaultOut          = brand.Binary + "-report.json"
-	// Pinned to the verified launch weights (engine parity 2.6e-6 against
-	// the Python model at fp32), so a push to the repo never silently
-	// changes users' scores. Bump deliberately, after re-running parity.
+	// Pinned to the verified weights (engine parity against the Python
+	// model at fp32 re-run on every bump), so a push to the repo never
+	// silently changes users' scores. Bump deliberately, after re-running
+	// parity.
 	defaultModel = "hf:" + brand.ModelRepo + "@" + brand.ModelCommit
 )
 

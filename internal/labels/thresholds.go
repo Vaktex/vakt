@@ -13,24 +13,24 @@ import (
 // validation data, in head order. Rare families sit well below 0.5, so a
 // single 0.5 cut-off would leave several of them never firing.
 var DefaultThresholds = [core.NumFamilies]float64{
-	0.2944398275106302,   // access_control
-	0.24805404387057053,  // authentication
-	0.21452892647728386,  // authorization
-	0.20471088261263026,  // communication_security
-	0.11190292114179588,  // credentials_and_secrets
-	0.1970535984366234,   // cryptographic_issues
-	0.39922511987750714,  // data_neutralization
-	0.18418992012083565,  // data_processing
-	0.03141314444955876,  // error_handling
-	0.2276440516540958,   // file_and_path
-	0.06971980836669046,  // initialization_and_cleanup
-	0.2473448405165064,   // memory_safety
-	0.23279998674652683,  // resource_management
-	0.25443853571770425,  // serialization_and_parsing
-	0.16634039820258426,  // session_management
-	0.02862530178199642,  // synchronization_and_concurrency
-	0.19506198965689228,  // web_security
-	0.049114563030317776, // other
+	0.3066038843350505,   // access_control
+	0.2928365884080407,   // authentication
+	0.2845438533372397,   // authorization
+	0.22084363956391176,  // communication_security
+	0.3395179034181917,   // credentials_and_secrets
+	0.17693129806181332,  // cryptographic_issues
+	0.21428010703490563,  // data_neutralization
+	0.14725222836749954,  // data_processing
+	0.11061918228642885,  // error_handling
+	0.17032466822271736,  // file_and_path
+	0.12121400925811497,  // initialization_and_cleanup
+	0.2832721713234602,   // memory_safety
+	0.24380708177967444,  // resource_management
+	0.14046872348128342,  // serialization_and_parsing
+	0.31703013639211025,  // session_management
+	0.05352505482257432,  // synchronization_and_concurrency
+	0.3382818172097932,   // web_security
+	0.07727904300183096,  // other
 }
 
 // ParseThresholds reads a thresholds.json document ({"families": {name: cut}}).

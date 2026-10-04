@@ -83,7 +83,7 @@
         "data_neutralization": 0.01,
         "data_processing": 0.01,
         "error_handling": 0.01,
-        "file_and_path": 0.6,
+        "file_and_path": 0.5,
         "initialization_and_cleanup": 0.01,
         "memory_safety": 0.9,
         "resource_management": 0.01,
@@ -106,7 +106,7 @@
           "tokens": 16000,
           "severity": 0.55,
           "top_family": "file_and_path",
-          "top_family_prob": 0.6
+          "top_family_prob": 0.5
         },
         {
           "split_part": 2,

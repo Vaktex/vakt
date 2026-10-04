@@ -58,7 +58,7 @@ func fixture() (Meta, []Result) {
 		{Unit: u("app/views.py", "Python", core.KindFunction, "search", 5, 30), Tokens: 400, Scores: scores(0.78, map[string]float32{"data_neutralization": 0.82})},
 		{Unit: u("app/views.py", "Python", core.KindMethod, "Admin.delete", 40, 60), Tokens: 350, Scores: scores(0.61, map[string]float32{"authorization": 0.7})},
 		{Unit: u("app/util.py", "Python", core.KindResidual, "", 1, 20), Tokens: 120, Scores: scores(0.2, nil)},
-		{Unit: part(1, 10, 200), Tokens: 16000, Scores: scores(0.55, map[string]float32{"memory_safety": 0.4, "file_and_path": 0.6})},
+		{Unit: part(1, 10, 200), Tokens: 16000, Scores: scores(0.55, map[string]float32{"memory_safety": 0.4, "file_and_path": 0.5})},
 		{Unit: part(2, 201, 400), Tokens: 15000, Scores: scores(0.88, map[string]float32{"memory_safety": 0.9}), Truncated: true},
 	}
 	return meta, res
@@ -83,8 +83,8 @@ func TestBuildSortingAndGrouping(t *testing.T) {
 	if p.Severity != 0.88 || p.Tokens != 31000 || !p.Truncated {
 		t.Errorf("parent severity/tokens/truncated = %v/%v/%v", p.Severity, p.Tokens, p.Truncated)
 	}
-	if got := p.Families[labels.Index("file_and_path")]; got != 0.6 {
-		t.Errorf("parent file_and_path = %v, want element-wise max 0.6", got)
+	if got := p.Families[labels.Index("file_and_path")]; got != 0.5 {
+		t.Errorf("parent file_and_path = %v, want element-wise max 0.5", got)
 	}
 	if p.TopFamily != "memory_safety" || p.TopFamilyProb != 0.9 {
 		t.Errorf("parent top = %s %v", p.TopFamily, p.TopFamilyProb)

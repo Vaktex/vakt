@@ -35,9 +35,9 @@ func TestDefaultThresholdsValid(t *testing.T) {
 func TestTopUsesCutoffs(t *testing.T) {
 	var p [core.NumFamilies]float64
 	p[Index("data_neutralization")] = 0.45
-	p[Index("error_handling")] = 0.10
+	p[Index("synchronization_and_concurrency")] = 0.15
 	i, prob := Top(p, DefaultThresholds)
-	if Families[i] != "error_handling" || prob != 0.10 {
+	if Families[i] != "synchronization_and_concurrency" || prob != 0.15 {
 		t.Fatalf("top = %s %.2f", Families[i], prob)
 	}
 }
