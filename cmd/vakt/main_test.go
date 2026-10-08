@@ -201,7 +201,7 @@ func TestParseModelSpec(t *testing.T) {
 
 func TestDemoPrettyAndFailOn(t *testing.T) {
 	isolate(t)
-	code, stdout, stderr := runCLI(t, "", "patrol", "--demo", "--no-color")
+	code, stdout, stderr := runCLI(t, "", "patrol", "--demo", "--threshold", "0.5", "--min-confidence", "0", "--no-color")
 	if code != exitFindings {
 		t.Fatalf("code=%d stderr=%s", code, stderr)
 	}
@@ -218,11 +218,11 @@ func TestDemoPrettyAndFailOn(t *testing.T) {
 	if strings.Contains(stdout, "\x1b") {
 		t.Error("--no-color output has escapes")
 	}
-	code, _, stderr = runCLI(t, "", "patrol", "--demo", "--quiet", "--fail-on", "0.5")
+	code, _, stderr = runCLI(t, "", "patrol", "--demo", "--threshold", "0.5", "--min-confidence", "0", "--quiet", "--fail-on", "0.5")
 	if code != exitFindings || !strings.Contains(stderr, "--fail-on 0.50") {
 		t.Errorf("fail-on: code=%d stderr=%q", code, stderr)
 	}
-	if code, _, _ := runCLI(t, "", "patrol", "--demo", "--quiet", "--fail-on", "0.99"); code != 0 {
+	if code, _, _ := runCLI(t, "", "patrol", "--demo", "--threshold", "0.5", "--min-confidence", "0", "--quiet", "--fail-on", "0.99"); code != 0 {
 		t.Errorf("fail-on above max: code=%d", code)
 	}
 	// NO_COLOR is honoured even without --no-color (the buffer is not a TTY anyway).
@@ -234,7 +234,7 @@ func TestDemoPrettyAndFailOn(t *testing.T) {
 
 func TestDemoJSONAndReportCmd(t *testing.T) {
 	isolate(t)
-	code, stdout, stderr := runCLI(t, "", "patrol", "--demo", "--format", "json", "--out", "-")
+	code, stdout, stderr := runCLI(t, "", "patrol", "--demo", "--threshold", "0.5", "--min-confidence", "0", "--format", "json", "--out", "-")
 	if code != exitFindings {
 		t.Fatalf("code=%d stderr=%s", code, stderr)
 	}
@@ -251,7 +251,7 @@ func TestDemoJSONAndReportCmd(t *testing.T) {
 	}
 
 	path := filepath.Join(t.TempDir(), "r.json")
-	if code, _, stderr := runCLI(t, "", "patrol", "--demo", "--format", "both", "--out", path, "--no-color"); code != exitFindings {
+	if code, _, stderr := runCLI(t, "", "patrol", "--demo", "--threshold", "0.5", "--min-confidence", "0", "--format", "both", "--out", path, "--no-color"); code != exitFindings {
 		t.Fatalf("both: %d %s", code, stderr)
 	}
 	if st, err := os.Stat(path); err != nil || st.Mode().Perm() != 0o600 {

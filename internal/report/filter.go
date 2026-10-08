@@ -30,15 +30,28 @@ func Filter(r *Report, threshold float64, families []string) *Report {
 	}
 	out := *r
 	out.Units = []Unit{}
-	out.Summary = Summary{Threshold: threshold}
-	files := map[string]*File{}
-	var order []string
+	out.Summary.Threshold = threshold
 	for _, u := range r.Units {
 		if len(want) > 0 && !want[u.TopFamily] {
 			continue
 		}
-		u.Flagged = u.Severity >= threshold
 		out.Units = append(out.Units, u)
+	}
+	ApplyConfidence(&out, r.Summary.MinConfidence)
+	sortUnits(out.Units)
+	out.Scan.Units = len(out.Units)
+	return &out
+}
+
+// ApplyConfidence recomputes flags and file/summary aggregates without removing
+// scored units or changing scan statistics. A zero minimum disables the gate.
+func ApplyConfidence(r *Report, minConfidence float64) {
+	r.Summary = Summary{Threshold: r.Summary.Threshold, MinConfidence: minConfidence}
+	files := map[string]*File{}
+	var order []string
+	for i := range r.Units {
+		u := &r.Units[i]
+		u.Flagged = u.Severity >= r.Summary.Threshold && u.TopFamilyProb >= minConfidence
 		f := files[u.File]
 		if f == nil {
 			f = &File{File: u.File, Language: u.Language}
@@ -49,30 +62,27 @@ func Filter(r *Report, threshold float64, families []string) *Report {
 		f.MaxSeverity = max(f.MaxSeverity, u.Severity)
 		if u.Flagged {
 			f.FlaggedUnits++
-			out.Summary.FlaggedUnits++
+			r.Summary.FlaggedUnits++
 			if i := labels.Index(u.TopFamily); i >= 0 {
-				out.Summary.ByFamily[i]++
+				r.Summary.ByFamily[i]++
 			}
 		}
 	}
-	out.Files = []File{}
+	r.Files = []File{}
 	for _, name := range order {
 		f := files[name]
-		out.Files = append(out.Files, *f)
+		r.Files = append(r.Files, *f)
 		if f.FlaggedUnits > 0 {
-			out.Summary.FlaggedFiles++
+			r.Summary.FlaggedFiles++
 		}
 	}
-	sort.SliceStable(out.Files, func(a, b int) bool {
-		fa, fb := out.Files[a], out.Files[b]
+	sort.SliceStable(r.Files, func(a, b int) bool {
+		fa, fb := r.Files[a], r.Files[b]
 		if fa.MaxSeverity != fb.MaxSeverity {
 			return fa.MaxSeverity > fb.MaxSeverity
 		}
 		return fa.File < fb.File
 	})
-	sortUnits(out.Units)
-	out.Scan.Units = len(out.Units)
-	return &out
 }
 
 // MaxSeverity returns the highest unit severity in r.

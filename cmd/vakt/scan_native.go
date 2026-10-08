@@ -118,7 +118,7 @@ func warmUp(ctx context.Context, e core.Engine) error {
 
 // nativeBench loads the cached model and times one forward pass.
 func nativeBench(ctx context.Context) (string, error) {
-	path, sha, err := hub.Cached(hub.Options{Repo: brand.ModelRepo, Revision: "main"})
+	path, sha, err := hub.Cached(hub.Options{Repo: brand.ModelRepo, Revision: brand.ModelCommit})
 	if err != nil {
 		return "", errors.New("model not cached; run `" + brand.Binary + " summon` first")
 	}

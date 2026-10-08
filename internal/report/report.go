@@ -162,10 +162,11 @@ type File struct {
 
 // Summary holds the headline numbers.
 type Summary struct {
-	Threshold    float64      `json:"threshold"`
-	FlaggedUnits int          `json:"flagged_units"`
-	FlaggedFiles int          `json:"flagged_files"`
-	ByFamily     FamilyCounts `json:"by_family"`
+	Threshold     float64      `json:"threshold"`
+	MinConfidence float64      `json:"min_confidence,omitempty"`
+	FlaggedUnits  int          `json:"flagged_units"`
+	FlaggedFiles  int          `json:"flagged_files"`
+	ByFamily      FamilyCounts `json:"by_family"`
 }
 
 // round4 rounds to 4 decimals and maps NaN/Inf and out-of-range values into

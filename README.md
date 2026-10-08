@@ -89,7 +89,7 @@ See [docs/SECURITY-DESIGN.md](docs/SECURITY-DESIGN.md) for the details.
 
 ### Output
 
-The pretty report ranks flagged functions (severity at or above `--threshold`, default 0.5) with a severity bar, the CWE family and its confidence, location, name and language, then a families histogram and the flagged files.
+The pretty report ranks flagged functions (severity at or above `--threshold`, default 0.95, and selected-family score at or above `--min-confidence`, default 0.90) with a severity bar, the CWE family and its confidence, location, name and language, then a families histogram and the flagged files.
 
 The family shown is the one that most clears its published cut-off (`thresholds.json` on the model repo), not the raw largest probability: rare families have cut-offs far below 0.5, so the raw maximum would over-report the common ones. The JSON report has every function's severity and all 18 family probabilities.
 
@@ -101,8 +101,11 @@ The family shown is the one that most clears its published cut-off (`thresholds.
 # Scan the current directory
 vakt .
 
-# Stricter threshold, shorter list
-vakt patrol src --threshold 0.7 --top 10
+# Stricter severity threshold, shorter list
+vakt patrol src --threshold 0.99 --top 10
+
+# Broader review (disable the family-confidence gate)
+vakt patrol src --threshold 0.5 --min-confidence 0
 
 # Full detail for finding 1 from the last report
 vakt show 1
@@ -120,7 +123,7 @@ vakt patrol ./suspicious-repo --no-repo-ignores --include 'src/**'
 
 ### Headless mode and exit codes
 
-`vakt` exits 0 when nothing scores at or above the threshold, 1 when something does, 2 on error and 130 when interrupted. With `--fail-on`, it exits 1 only if a function scores at or above that value.
+`vakt` exits 0 when no function meets both the severity and family-confidence cutoffs, 1 when a function does, 2 on error and 130 when interrupted. With `--fail-on`, that value replaces the severity cutoff for the exit status; the family-confidence gate still applies. The family score is not a calibrated probability of a vulnerability. Stricter defaults reduce noise but can also hide real issues; all scored units remain in JSON, and `vakt report report.json --threshold 0.5 --min-confidence 0` broadens a saved report.
 
 ```bash
 # Machine-readable output

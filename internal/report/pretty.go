@@ -18,12 +18,13 @@ import (
 
 // PrettyOptions control the terminal rendering.
 type PrettyOptions struct {
-	Top       int      // rows in the top findings table (0 = 25)
-	Threshold float64  // flag threshold (0 = the report's threshold)
-	Families  []string // only show units whose top family is one of these
-	Color     bool     // ANSI colour and banner art; false gives plain text
-	Width     int      // terminal width (0 = 100)
-	Quiet     bool     // summary line only
+	Top           int      // rows in the top findings table (0 = 25)
+	Threshold     float64  // flag threshold (0 = the report's threshold)
+	MinConfidence float64  // minimum family confidence (report's minimum is a floor)
+	Families      []string // only show units whose top family is one of these
+	Color         bool     // ANSI colour and banner art; false gives plain text
+	Width         int      // terminal width (0 = 100)
+	Quiet         bool     // summary line only
 	// Verbose and Hyperlinks are accepted for callers of the alternative
 	// layout; the table ignores them.
 	Verbose    bool
@@ -92,11 +93,12 @@ func (p *palette) sev(s, thr float64) lipgloss.Style {
 
 // view is the filtered set of units Pretty renders.
 type view struct {
-	thr      float64
-	flagged  []Unit // sorted as in the report
-	byFamily [len(labels.Families)]int
-	files    []File // flagged files in report order
-	perFile  map[string][]Unit
+	thr           float64
+	minConfidence float64
+	flagged       []Unit // sorted as in the report
+	byFamily      [len(labels.Families)]int
+	files         []File // flagged files in report order
+	perFile       map[string][]Unit
 }
 
 // familyRepeats reports whether any family has more than one flagged unit.
@@ -110,7 +112,7 @@ func (v *view) familyRepeats() bool {
 }
 
 func newView(r *Report, o PrettyOptions) *view {
-	v := &view{thr: o.Threshold, perFile: map[string][]Unit{}}
+	v := &view{thr: o.Threshold, minConfidence: max(r.Summary.MinConfidence, o.MinConfidence), perFile: map[string][]Unit{}}
 	if v.thr <= 0 {
 		v.thr = r.Summary.Threshold
 	}
@@ -119,7 +121,7 @@ func newView(r *Report, o PrettyOptions) *view {
 		want[f] = true
 	}
 	for _, u := range r.Units {
-		if u.Severity < v.thr || (len(want) > 0 && !want[u.TopFamily]) {
+		if u.Severity < v.thr || u.TopFamilyProb < v.minConfidence || (len(want) > 0 && !want[u.TopFamily]) {
 			continue
 		}
 		v.flagged = append(v.flagged, u)
@@ -388,8 +390,12 @@ func fileTree(p *palette, v *view, o PrettyOptions) string {
 
 func summaryLine(p *palette, r *Report, v *view, width int) string {
 	if len(v.flagged) == 0 {
-		msg := fmt.Sprintf("✓ All clear: no units at or above %.2f across %s file%s (%s unit%s scanned).",
-			v.thr, commas(int64(r.Scan.Files)), plural(r.Scan.Files), commas(int64(r.Scan.Units)), plural(r.Scan.Units))
+		gate := fmt.Sprintf("at or above %.2f", v.thr)
+		if v.minConfidence > 0 {
+			gate += fmt.Sprintf(" with family confidence >= %.2f", v.minConfidence)
+		}
+		msg := fmt.Sprintf("✓ All clear: no units %s across %s file%s (%s unit%s scanned).",
+			gate, commas(int64(r.Scan.Files)), plural(r.Scan.Files), commas(int64(r.Scan.Units)), plural(r.Scan.Units))
 		return p.r.NewStyle().Foreground(lipgloss.Color("42")).Bold(true).Render(msg)
 	}
 	msg := fmt.Sprintf("%d unit%s flagged across %d file%s",

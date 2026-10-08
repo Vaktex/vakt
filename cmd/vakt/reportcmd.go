@@ -12,13 +12,14 @@ import (
 
 func newReportCmd() *cobra.Command {
 	var (
-		top       int
-		threshold float64
-		families  []string
-		format    string
-		noColor   bool
-		quiet     bool
-		verbose   bool
+		top           int
+		threshold     float64
+		minConfidence float64
+		families      []string
+		format        string
+		noColor       bool
+		quiet         bool
+		verbose       bool
 	)
 	cmd := &cobra.Command{
 		Use:   "report <report.json>",
@@ -52,6 +53,12 @@ func newReportCmd() *cobra.Command {
 			if err != nil {
 				return fmt.Errorf("%s: %w", args[0], err)
 			}
+			if cmd.Flags().Changed("min-confidence") {
+				if !(minConfidence >= 0 && minConfidence <= 1) {
+					return errors.New("--min-confidence must be in [0, 1]")
+				}
+				report.ApplyConfidence(rep, minConfidence)
+			}
 			rep = report.Filter(rep, threshold, families)
 			out := cmd.OutOrStdout()
 			switch format {
@@ -71,6 +78,7 @@ func newReportCmd() *cobra.Command {
 	f := cmd.Flags()
 	f.IntVar(&top, "top", defaultTop, "number of findings to print")
 	f.Float64Var(&threshold, "threshold", defaultThreshold, "flag functions with severity >= this (default: the report's)")
+	f.Float64Var(&minConfidence, "min-confidence", 0, "minimum selected family score (default: the report's; 0 disables)")
 	f.StringArrayVar(&families, "family", nil, "only show findings whose top family is this (repeatable)")
 	f.StringVar(&format, "format", "pretty", "output format: pretty or json")
 	f.BoolVar(&noColor, "no-color", false, "disable colour (also NO_COLOR)")

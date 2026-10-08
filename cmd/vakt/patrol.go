@@ -23,10 +23,11 @@ import (
 
 // Defaults for patrol flags.
 const (
-	defaultThreshold   = 0.5
-	defaultTop         = 25
-	defaultMinTokens   = 16
-	defaultBatchTokens = 4096
+	defaultThreshold     = 0.95
+	defaultMinConfidence = 0.90
+	defaultTop           = 25
+	defaultMinTokens     = 16
+	defaultBatchTokens   = 4096
 	// auto resolves to fp16 on Metal and tf32 on CUDA (score drift ~1e-3
 	// against the fp32 reference) and exact fp32 on CPU; --precision fp32
 	// keeps parity grade.
@@ -57,11 +58,12 @@ type ScanOptions struct {
 	FailOnSet bool
 
 	// Scoring.
-	Threshold   float64 // flag units with severity >= Threshold
-	MinTokens   int     // skip units whose rendered prompt is shorter
-	BatchTokens int     // padded tokens per engine batch
-	Jobs        int     // walk/parse/tokenize workers
-	NoCache     bool
+	MinConfidence float64 // minimum selected family score (not calibrated vulnerability probability)
+	Threshold     float64 // flag units with severity >= Threshold
+	MinTokens     int     // skip units whose rendered prompt is shorter
+	BatchTokens   int     // padded tokens per engine batch
+	Jobs          int     // walk/parse/tokenize workers
+	NoCache       bool
 
 	// File selection (walk.Options).
 	Include, Exclude []string
@@ -99,13 +101,14 @@ func newPatrolCmd() *cobra.Command {
 		Short:   "Scan a codebase and report the functions most likely to be vulnerable",
 		Long: "patrol walks a directory (default: the current one), splits source files into\n" +
 			"functions, scores each with " + brand.ModelName + " and prints the top findings.\n\n" +
-			"Exit status: 0 when there are no findings at or above the threshold,\n" +
+			"Findings must meet both --threshold and --min-confidence. Raw scores remain in JSON.\n" +
+			"Exit status: 0 when there are no findings meeting both cutoffs,\n" +
 			"1 when there are findings, 2 on error, 130 when interrupted.\n" +
-			"With --fail-on, exit 1 only if any function scores at or above that value.",
+			"With --fail-on, use that severity cutoff for exit status; --min-confidence still applies.",
 		Example: "  " + brand.Binary + " .\n" +
-			"  " + brand.Binary + " patrol src --threshold 0.7 --top 10\n" +
+			"  " + brand.Binary + " patrol src --threshold 0.99 --top 10\n" +
 			"  " + brand.Binary + " patrol . --format json --out - | jq .summary\n" +
-			"  " + brand.Binary + " patrol . --fail-on 0.9   # CI: exit 1 if severity >= 0.9",
+			"  " + brand.Binary + " patrol . --fail-on 0.9   # CI: severity >= 0.9 and family confidence >= 0.9",
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			o.Root = "."
@@ -124,6 +127,7 @@ func newPatrolCmd() *cobra.Command {
 	f.StringVar(&o.Format, "format", "pretty", "output format: pretty, json or both")
 	f.StringVarP(&o.Out, "out", "o", defaultOut, "JSON report path for --format json/both (- for stdout)")
 	f.Float64Var(&o.Threshold, "threshold", defaultThreshold, "flag functions with severity >= this score")
+	f.Float64Var(&o.MinConfidence, "min-confidence", defaultMinConfidence, "minimum selected family score for findings (0 disables; not a calibrated vulnerability probability)")
 	f.IntVar(&o.Top, "top", defaultTop, "number of findings to print")
 	f.IntVar(&o.MinTokens, "min-tokens", defaultMinTokens, "skip functions shorter than this many tokens")
 	f.IntVar(&o.BatchTokens, "batch-tokens", defaultBatchTokens, "padded tokens per model batch")
@@ -169,6 +173,8 @@ func (o *ScanOptions) finish(devices string, outSet, revisionSet bool) error {
 	switch {
 	case !(o.Threshold > 0 && o.Threshold <= 1):
 		return errors.New("--threshold must be in (0, 1]")
+	case !(o.MinConfidence >= 0 && o.MinConfidence <= 1):
+		return errors.New("--min-confidence must be in [0, 1]")
 	case o.FailOnSet && !(o.FailOn >= 0 && o.FailOn <= 1):
 		return errors.New("--fail-on must be in [0, 1]")
 	case o.Top < 1:
@@ -336,6 +342,7 @@ func patrol(ctx context.Context, stdout, stderr io.Writer, o ScanOptions) error 
 
 // emit writes the report in the requested formats and sets the exit code.
 func emit(stdout, stderr io.Writer, rep *report.Report, o ScanOptions) error {
+	report.ApplyConfidence(rep, o.MinConfidence)
 	if o.Format == "json" || o.Format == "both" {
 		if o.Out == "-" {
 			if err := report.WriteJSON(stdout, rep); err != nil {
@@ -370,7 +377,7 @@ func emit(stdout, stderr io.Writer, rep *report.Report, o ScanOptions) error {
 		if u.Severity > maxSev {
 			maxSev = u.Severity
 		}
-		if u.Severity >= failAt {
+		if u.Severity >= failAt && u.TopFamilyProb >= o.MinConfidence {
 			n++
 		}
 	}
