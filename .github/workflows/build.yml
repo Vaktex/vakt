@@ -74,9 +74,25 @@ jobs:
         with:
           go-version-file: go.mod
           cache: ${{ !startsWith(github.ref, 'refs/tags/') }}
+      - name: Select SDK with MetalPerformancePrimitives
+        shell: bash
+        run: |
+          # NAX shaders (M5+) need this framework even when CI tests use CPU.
+          # Older default SDKs silently produced corrupt embedded JIT sources.
+          for app in /Applications/Xcode*.app; do
+            developer="$app/Contents/Developer"
+            sdk=$(DEVELOPER_DIR="$developer" xcrun --sdk macosx --show-sdk-path 2>/dev/null) || continue
+            if [ -f "$sdk/System/Library/Frameworks/MetalPerformancePrimitives.framework/Headers/MetalPerformancePrimitives.h" ]; then
+              echo "DEVELOPER_DIR=$developer" >> "$GITHUB_ENV"
+              echo "Selected $developer ($sdk)"
+              exit 0
+            fi
+          done
+          echo "::error::No installed Xcode SDK provides MetalPerformancePrimitives"
+          exit 1
       - name: Tools
         run: |
-          brew install ccache
+          brew install ccache bats
           go install "mvdan.cc/garble@${GARBLE_VERSION}"
           rustup toolchain install "${RUST_TOOLCHAIN}" --profile minimal && rustup default "${RUST_TOOLCHAIN}"
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0 # zizmor: ignore[cache-poisoning]
@@ -90,6 +106,8 @@ jobs:
           key: native-${{ runner.os }}-${{ runner.arch }}-metal-${{ hashFiles('third_party/mlx/VERSIONS', 'third_party/mlx/build.sh', 'third_party/tokenizers/build.sh') }}
       - name: Native deps
         run: make deps
+      - name: Metal JIT generator regression tests
+        run: bats test/metal-jit.bats
       - name: Tests
         # Hosted macOS runners expose a paravirtual GPU whose Metal compute
         # support varies; engine tests fall back to the MLX CPU stream.

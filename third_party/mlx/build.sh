@@ -200,6 +200,13 @@ metal)
 		echo "error: the Metal toolchain is missing. Run: xcodebuild -downloadComponent MetalToolchain" >&2
 		exit 1
 	fi
+	# JIT preprocessing needs the SDK framework as well as the Metal compiler.
+	# A compiler from a newer toolchain paired with an old SDK is insufficient.
+	sdk="$(xcrun --sdk macosx --show-sdk-path)"
+	if [[ ! -f "$sdk/System/Library/Frameworks/MetalPerformancePrimitives.framework/Headers/MetalPerformancePrimitives.h" ]]; then
+		echo "error: selected macOS SDK lacks MetalPerformancePrimitives; select Xcode 26 or newer with DEVELOPER_DIR" >&2
+		exit 1
+	fi
 	;;
 cpu)
 	opts+=(-DMLX_BUILD_METAL=OFF -DMLX_BUILD_CUDA=OFF -DMLX_BUILD_CPU=ON)
