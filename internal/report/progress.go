@@ -75,11 +75,11 @@ func ProgressLine(p *Progress, now time.Time) string {
 	} else if tokTotal > 0 && tokScored >= tokTotal {
 		eta = "0s"
 	}
-	line := fmt.Sprintf("⠿ files %s/%s · units %s/%s · tokens %s/%s · %s tok/s · ETA %s",
+	line := fmt.Sprintf("files %s/%s  units %s/%s  tokens %s/%s  %s tok/s  ETA %s",
 		commas(parsed), commas(found), commas(scored), commas(units),
 		human(float64(tokScored)), human(float64(tokTotal)), human(rate), eta)
 	if c := p.CacheHits.Load(); c > 0 {
-		line += fmt.Sprintf(" · %s cached", commas(c))
+		line += fmt.Sprintf("  %s cached", commas(c))
 	}
 	return line
 }

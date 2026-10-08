@@ -426,7 +426,7 @@ func TestProgressLine(t *testing.T) {
 	p.TokensScored.Store(10000)
 	p.CacheHits.Store(3)
 	got := ProgressLine(&p, time.Unix(2, 0))
-	want := "⠿ files 10/10 · units 50/100 · tokens 10.0k/20.0k · 5,000 tok/s · ETA 2.0s · 3 cached"
+	want := "files 10/10  units 50/100  tokens 10.0k/20.0k  5,000 tok/s  ETA 2.0s  3 cached"
 	if got != want {
 		t.Errorf("got  %q\nwant %q", got, want)
 	}
@@ -443,7 +443,7 @@ func TestProgressLineShowsETAWhileFilesAreStillBeingDiscovered(t *testing.T) {
 	p.TokensScored.Store(71700)
 
 	got := ProgressLine(&p, time.Unix(24, 0))
-	want := "⠿ files 350/377 · units 321/1,815 · tokens 71.7k/514.0k · 2,988 tok/s · ETA 2m28s"
+	want := "files 350/377  units 321/1,815  tokens 71.7k/514.0k  2,988 tok/s  ETA 2m28s"
 	if got != want {
 		t.Errorf("got  %q\nwant %q", got, want)
 	}

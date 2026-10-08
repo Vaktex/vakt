@@ -113,7 +113,11 @@ func runDoctorCount(ctx context.Context, w io.Writer, goos string, bench bool) (
 	d.section("Model")
 	d.row("repo", brand.ModelRepo)
 	d.row("cache", hub.CacheDir())
-	if path, sha, err := hub.Cached(hub.Options{Repo: brand.ModelRepo, Revision: "main"}); err == nil {
+	d.row("revision", brand.ModelCommit)
+	// Check the exact pinned commit vakt uses (summon/patrol resolve
+	// brand.ModelCommit), not refs/main: a stale `main` ref can point at a
+	// different snapshot and make doctor report "cached" while summon 404s.
+	if path, sha, err := hub.Cached(hub.Options{Repo: brand.ModelRepo, Revision: brand.ModelCommit}); err == nil {
 		d.row("status", "cached")
 		d.row("path", path)
 		d.row("sha256", sha)
