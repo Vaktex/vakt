@@ -19,6 +19,7 @@ import (
 	"github.com/vaktex/vakt/internal/core"
 	"github.com/vaktex/vakt/internal/hub"
 	"github.com/vaktex/vakt/internal/report"
+	"github.com/vaktex/vakt/internal/results"
 )
 
 // Defaults for patrol flags.
@@ -47,7 +48,7 @@ type ScanOptions struct {
 	Root string // absolute path of the directory to scan
 
 	// Output.
-	Format  string  // "pretty", "json" or "both"
+	Format  string  // "pretty", "json", "both" or "jsonl"
 	Out     string  // JSON destination for json/both; "-" is stdout
 	Top     int     // rows in the pretty top findings table
 	Quiet   bool    // summary line only, no progress
@@ -82,6 +83,16 @@ type ScanOptions struct {
 	Devices       []int  // GPU indices; empty means the engine's default
 
 	Demo bool // hidden: synthetic report from engine.Fake
+
+	// OnResult, when set, sees each scored result as it arrives (set by
+	// patrol for --format jsonl; runScan passes it to pipeline.Config).
+	OnResult func(report.Result)
+	// OnFile, when set, sees each scanned file's contents (set by patrol for
+	// --save-results; runScan passes it to pipeline.Config).
+	OnFile func(rel string, data []byte)
+
+	// SaveResults stores the results under Root/.vakt (see internal/results).
+	SaveResults bool
 }
 
 // runScan runs a scan. The integrator replaces it with the real pipeline in
@@ -108,6 +119,7 @@ func newPatrolCmd() *cobra.Command {
 		Example: "  " + brand.Binary + " .\n" +
 			"  " + brand.Binary + " patrol src --threshold 0.99 --top 10\n" +
 			"  " + brand.Binary + " patrol . --format json --out - | jq .summary\n" +
+			"  " + brand.Binary + " patrol . --format jsonl   # one JSON line per unit as it is scored, then the report\n" +
 			"  " + brand.Binary + " patrol . --fail-on 0.9   # CI: severity >= 0.9 and family confidence >= 0.9",
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -117,6 +129,9 @@ func newPatrolCmd() *cobra.Command {
 			}
 			f := cmd.Flags()
 			o.FailOnSet = f.Changed("fail-on")
+			if o.Format == "jsonl" && !f.Changed("out") {
+				o.Out = "-" // a stream is read as it is written: stdout unless told otherwise
+			}
 			if err := o.finish(devices, f.Changed("out"), f.Changed("revision")); err != nil {
 				return &exitCodeError{code: exitError, err: err}
 			}
@@ -124,8 +139,8 @@ func newPatrolCmd() *cobra.Command {
 		},
 	}
 	f := cmd.Flags()
-	f.StringVar(&o.Format, "format", "pretty", "output format: pretty, json or both")
-	f.StringVarP(&o.Out, "out", "o", defaultOut, "JSON report path for --format json/both (- for stdout)")
+	f.StringVar(&o.Format, "format", "pretty", "output format: pretty, json, both or jsonl (a line per unit as it is scored, then the report)")
+	f.StringVarP(&o.Out, "out", "o", defaultOut, "JSON report path for --format json/both (- for stdout; jsonl defaults to -)")
 	f.Float64Var(&o.Threshold, "threshold", defaultThreshold, "flag functions with severity >= this score")
 	f.Float64Var(&o.MinConfidence, "min-confidence", defaultMinConfidence, "minimum selected family score for findings (0 disables; not a calibrated vulnerability probability)")
 	f.IntVar(&o.Top, "top", defaultTop, "number of findings to print")
@@ -148,6 +163,7 @@ func newPatrolCmd() *cobra.Command {
 	f.BoolVarP(&o.Verbose, "verbose", "v", false, "show model/backend stats and per-finding scores")
 	f.BoolVar(&o.NoColor, "no-color", false, "disable colour (also NO_COLOR)")
 	f.Float64Var(&o.FailOn, "fail-on", 0, "exit with status 1 if any function scores >= this")
+	f.BoolVar(&o.SaveResults, "save-results", false, "store results in .vakt under the scanned directory, keyed by file hash, for `"+brand.Binary+" results` and editors")
 	f.BoolVar(&o.Demo, "demo", false, "render a synthetic report from the fake engine")
 	_ = f.MarkHidden("demo")
 	return cmd
@@ -160,7 +176,7 @@ func (o *ScanOptions) finish(devices string, outSet, revisionSet bool) error {
 		if outSet {
 			return errors.New("--out only applies to --format json or both")
 		}
-	case "json", "both":
+	case "json", "both", "jsonl":
 		if o.Out == "" {
 			return errors.New("--out must not be empty")
 		}
@@ -168,7 +184,7 @@ func (o *ScanOptions) finish(devices string, outSet, revisionSet bool) error {
 			return errors.New("--format both writes the pretty report to stdout; give --out a file path")
 		}
 	default:
-		return fmt.Errorf("--format must be pretty, json or both (got %q)", o.Format)
+		return fmt.Errorf("--format must be pretty, json, both or jsonl (got %q)", o.Format)
 	}
 	switch {
 	case !(o.Threshold > 0 && o.Threshold <= 1):
@@ -315,13 +331,33 @@ func resolveModel(ctx context.Context, o ScanOptions, stderr io.Writer) (path, s
 	return res.path, res.sha, err
 }
 
-func patrol(ctx context.Context, stdout, stderr io.Writer, o ScanOptions) error {
-	var (
-		rep *report.Report
-		err error
-	)
+func patrol(ctx context.Context, stdout, stderr io.Writer, o ScanOptions) (err error) {
+	var js *report.JSONL
+	if o.Format == "jsonl" {
+		w, closeOut, err := jsonlSink(stdout, o.Out)
+		if err != nil {
+			return &exitCodeError{code: exitError, err: err}
+		}
+		defer func() {
+			if cerr := closeOut(); cerr != nil && err == nil {
+				err = &exitCodeError{code: exitError, err: fmt.Errorf("write report: %w", cerr)}
+			}
+		}()
+		js = report.NewJSONL(w)
+		if err := js.Start(o.Root); err != nil {
+			return &exitCodeError{code: exitError, err: fmt.Errorf("write report: %w", err)}
+		}
+	}
+	var rep *report.Report
 	if o.Demo {
 		rep, err = demoReport(ctx, o)
+		if err == nil && js != nil {
+			// The demo has no pipeline to stream from: send its units up front.
+			report.ApplyConfidence(rep, o.MinConfidence)
+			for _, u := range rep.Units {
+				_ = js.Unit(u) // a write error is reported with the final event
+			}
+		}
 	} else {
 		prog := &report.Progress{Started: time.Now()}
 		pctx, stop := context.WithCancel(ctx)
@@ -330,19 +366,91 @@ func patrol(ctx context.Context, stdout, stderr io.Writer, o ScanOptions) error 
 			wg.Add(1)
 			go func() { defer wg.Done(); report.RenderProgress(pctx, stderr, prog) }()
 		}
+		if js != nil {
+			s := report.NewStream(o.Threshold, o.MinConfidence)
+			o.OnResult = func(r report.Result) {
+				if u, ok := s.Add(r); ok {
+					_ = js.Unit(u) // a write error is reported with the final event
+				}
+			}
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				t := time.NewTicker(report.ProgressEvery)
+				defer t.Stop()
+				for {
+					select {
+					case <-pctx.Done():
+						return
+					case now := <-t.C:
+						_ = js.Progress(prog, now)
+					}
+				}
+			}()
+		}
+		var hashes map[string]string
+		var hashMu sync.Mutex
+		if o.SaveResults {
+			hashes = map[string]string{}
+			o.OnFile = func(rel string, data []byte) {
+				h := results.Hash(data)
+				hashMu.Lock()
+				hashes[rel] = h
+				hashMu.Unlock()
+			}
+		}
 		rep, err = runScan(ctx, o, prog)
 		stop()
 		wg.Wait()
+		if err == nil && o.SaveResults {
+			// The scan succeeded either way; a results store that cannot be
+			// written is worth a warning, not a failed scan.
+			if serr := saveResults(o, rep, hashes); serr != nil && !o.Quiet {
+				fmt.Fprintf(stderr, "warning: could not save results to %s: %v\n", results.Dir, serr)
+			}
+		}
 	}
 	if err != nil {
 		return &exitCodeError{code: exitError, err: err}
 	}
-	return emit(stdout, stderr, rep, o)
+	return emit(stdout, stderr, rep, o, js)
+}
+
+// saveResults merges a scan's units into Root/.vakt. A scan limited by
+// --include/--exclude replaces only the files it read.
+func saveResults(o ScanOptions, rep *report.Report, hashes map[string]string) error {
+	key, err := results.Key(hub.RootDir())
+	if err != nil {
+		return err
+	}
+	whole := len(o.Include) == 0 && len(o.Exclude) == 0
+	return results.Update(o.Root, key, rep.Model, results.ByFile(rep.Units, hashes), whole)
+}
+
+// jsonlSink is where --format jsonl writes: stdout for "-", else a new file
+// (written as the scan runs, so not atomically like --format json).
+func jsonlSink(stdout io.Writer, out string) (io.Writer, func() error, error) {
+	if out == "-" {
+		return stdout, func() error { return nil }, nil
+	}
+	f, err := os.OpenFile(out, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600) // #nosec G304 -- the user's --out path
+	if err != nil {
+		return nil, nil, fmt.Errorf("write report: %w", err)
+	}
+	return f, f.Close, nil
 }
 
 // emit writes the report in the requested formats and sets the exit code.
-func emit(stdout, stderr io.Writer, rep *report.Report, o ScanOptions) error {
+func emit(stdout, stderr io.Writer, rep *report.Report, o ScanOptions, js *report.JSONL) error {
 	report.ApplyConfidence(rep, o.MinConfidence)
+	if js != nil {
+		if err := js.Report(rep); err != nil {
+			return &exitCodeError{code: exitError, err: fmt.Errorf("write report: %w", err)}
+		}
+		if !o.Quiet && o.Out != "-" {
+			fmt.Fprintf(stderr, "report written to %s\n", o.Out)
+		}
+	}
 	if o.Format == "json" || o.Format == "both" {
 		if o.Out == "-" {
 			if err := report.WriteJSON(stdout, rep); err != nil {

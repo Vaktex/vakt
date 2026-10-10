@@ -49,6 +49,8 @@ Available Commands:
   mcp         Serve Vaktex OSS to a coding agent over the Model Context Protocol
   patrol      Scan a codebase and report the functions most likely to be vulnerable
   report      Re-render a saved JSON report
+  results     Print stored results for files unchanged since their last scan
+  serve       Score files on request with the model kept loaded (for editors)
   show        Print full details for finding n from a report
   summon      Download DOM-0.8B into the local cache
   version     Print the version, commit, backend and model
@@ -287,6 +289,52 @@ func TestDemoJSONAndReportCmd(t *testing.T) {
 	}
 	if code, _, stderr := runCLI(t, "", "show", "999", "--report", path); code != exitError || !strings.Contains(stderr, "not found") {
 		t.Errorf("show OOB: %d %q", code, stderr)
+	}
+}
+
+func TestDemoJSONL(t *testing.T) {
+	isolate(t)
+	code, stdout, stderr := runCLI(t, "", "patrol", "--demo", "--threshold", "0.5", "--min-confidence", "0", "--format", "jsonl")
+	if code != exitFindings {
+		t.Fatalf("code=%d stderr=%s", code, stderr)
+	}
+	lines := strings.Split(strings.TrimRight(stdout, "\n"), "\n")
+	var types []string
+	units := 0
+	var final *report.Report
+	for _, l := range lines {
+		var ev struct {
+			Type   string          `json:"type"`
+			Report json.RawMessage `json:"report"`
+		}
+		if err := json.Unmarshal([]byte(l), &ev); err != nil {
+			t.Fatalf("line %q: %v", l, err)
+		}
+		types = append(types, ev.Type)
+		if ev.Type == "unit" {
+			units++
+		}
+		if ev.Type == "report" {
+			r, err := report.ReadJSON(bytes.NewReader(ev.Report))
+			if err != nil {
+				t.Fatal(err)
+			}
+			final = r
+		}
+	}
+	if types[0] != "start" || types[len(types)-1] != "report" || final == nil {
+		t.Fatalf("events = %v", types)
+	}
+	if units != len(final.Units) {
+		t.Errorf("streamed %d units, report has %d", units, len(final.Units))
+	}
+
+	path := filepath.Join(t.TempDir(), "r.jsonl")
+	if code, _, _ := runCLI(t, "", "patrol", "--demo", "--min-confidence", "0", "--format", "jsonl", "--out", path, "--quiet"); code != exitFindings && code != 0 {
+		t.Fatalf("jsonl to file: %d", code)
+	}
+	if st, err := os.Stat(path); err != nil || st.Mode().Perm() != 0o600 {
+		t.Fatalf("jsonl file: %v", err)
 	}
 }
 

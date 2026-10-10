@@ -46,6 +46,22 @@ type Config struct {
 	CacheDir    string
 
 	ModelRepo, ModelRevision, Precision string
+
+	// Files, when non-nil, are scanned instead of walking Root: the callers
+	// that already hold file contents (vakt serve scoring an unsaved editor
+	// buffer) pass them here. Rel must be a clean path relative to Root.
+	Files []walk.File
+
+	// OnResult, when set, sees each result as it is collected, before the
+	// report is built (patrol --format jsonl streams units from it). It runs
+	// on the collecting goroutine, one result at a time, and must not block
+	// for long: scoring waits on the collector.
+	OnResult func(report.Result)
+
+	// OnFile, when set, sees each file's contents before it is parsed (patrol
+	// --save-results hashes them). It is called concurrently from the parse
+	// workers and must not keep data.
+	OnFile func(rel string, data []byte)
 }
 
 // Run scans cfg.Root with the given engines (one per device) and tokenizer.
@@ -154,6 +170,16 @@ func RunOpening(ctx context.Context, cfg Config, open func(context.Context) ([]c
 			// Walker goroutines each hold one read file while blocked on send.
 			wo.Jobs = max(4, 2*cfg.Jobs)
 		}
+		if cfg.Files != nil {
+			for _, f := range cfg.Files {
+				select {
+				case files <- f:
+				case <-ctx.Done():
+					return
+				}
+			}
+			return
+		}
 		walkErr = walk.Walk(ctx, cfg.Root, wo, files, skipsC)
 	}()
 
@@ -170,6 +196,9 @@ func RunOpening(ctx context.Context, cfg Config, open func(context.Context) ([]c
 				// walk read the file through its root-bound handle; never
 				// reopen f.Path (a path swap could escape the root).
 				src := f.Data
+				if cfg.OnFile != nil {
+					cfg.OnFile(f.Rel, src)
+				}
 				lang, ok := ast.Detect(f.Rel, src[:min(len(src), 8192)])
 				if !ok {
 					addSkip(f.Rel, "not source code")
@@ -393,6 +422,9 @@ func RunOpening(ctx context.Context, cfg Config, open func(context.Context) ([]c
 	var out []report.Result
 	for r := range results {
 		out = append(out, r)
+		if cfg.OnResult != nil {
+			cfg.OnResult(r)
+		}
 	}
 	all.Wait()
 	select {

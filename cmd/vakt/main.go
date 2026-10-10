@@ -116,6 +116,8 @@ func newRootCmd(stdin io.Reader, stdout, stderr io.Writer) *cobra.Command {
 		newSummonCmd(),
 		newDoctorCmd(),
 		newReportCmd(),
+		newResultsCmd(),
+		newServeCmd(),
 		newShowCmd(),
 		newMCPCmd(),
 		newVersionCmd(),

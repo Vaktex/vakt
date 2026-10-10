@@ -15,6 +15,7 @@ import (
 	"github.com/vaktex/vakt/internal/engine"
 	"github.com/vaktex/vakt/internal/report"
 	"github.com/vaktex/vakt/internal/tokenize"
+	"github.com/vaktex/vakt/internal/walk"
 )
 
 func writeTree(t *testing.T, files map[string]string) string {
@@ -331,5 +332,48 @@ func TestRunOpeningOpenError(t *testing.T) {
 	open := func(context.Context) ([]core.Engine, error) { return nil, boom }
 	if _, err := RunOpening(context.Background(), Config{Root: root, Jobs: 2, NoCache: true}, open, newTok(t), nil); !errors.Is(err, boom) {
 		t.Fatalf("err = %v, want open error", err)
+	}
+}
+
+// OnResult sees every result once, so a report.Stream fed from it produces
+// every unit of the final report (split units included).
+func TestOnResultStreamsEveryUnit(t *testing.T) {
+	root := sampleTree(t)
+	s := report.NewStream(0.5, 0)
+	streamed := map[string]bool{}
+	cfg := Config{Root: root, Jobs: 4, Threshold: 0.5, NoCache: true, OnResult: func(r report.Result) {
+		if u, ok := s.Add(r); ok {
+			streamed[fmt.Sprintf("%s:%d:%s", u.File, u.StartLine, u.Name)] = true
+		}
+	}}
+	rep, err := Run(context.Background(), cfg, []core.Engine{&countingEngine{budget: 32768, t: t}}, newTok(t), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	split := false
+	for _, u := range rep.Units {
+		split = split || u.SplitOf > 0
+		if !streamed[fmt.Sprintf("%s:%d:%s", u.File, u.StartLine, u.Name)] {
+			t.Errorf("unit %s:%d %s was never streamed", u.File, u.StartLine, u.Name)
+		}
+	}
+	if len(streamed) != len(rep.Units) || !split {
+		t.Errorf("streamed %d units, report has %d (split present: %v)", len(streamed), len(rep.Units), split)
+	}
+}
+
+// Files replaces the walk: only the given contents are scanned, even when
+// they differ from (or do not exist on) disk.
+func TestRunFilesOverridesWalk(t *testing.T) {
+	root := writeTree(t, map[string]string{"app.py": "def on_disk():\n    return 1\n"})
+	cfg := Config{Root: root, Jobs: 2, NoCache: true, Files: []walk.File{
+		{Rel: "app.py", Data: []byte("def unsaved(a, b):\n    total = a + b\n    return total * 2\n")},
+	}}
+	rep, err := Run(context.Background(), cfg, []core.Engine{&countingEngine{budget: 32768, t: t}}, newTok(t), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rep.Units) != 1 || rep.Units[0].Name != "unsaved" {
+		t.Fatalf("units = %+v", rep.Units)
 	}
 }

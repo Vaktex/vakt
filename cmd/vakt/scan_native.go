@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"time"
@@ -25,6 +26,92 @@ import (
 func init() {
 	runScan = nativeScan
 	doctorBench = nativeBench
+	openServeScorer = nativeServeScorer
+}
+
+// nativeScorer keeps the model, tokenizer and parser workers of `vakt serve`
+// loaded between requests.
+type nativeScorer struct {
+	o         ScanOptions
+	repo, rev string
+	engines   []core.Engine
+	tok       core.Tokenizer
+	iso       *ast.Isolated
+}
+
+// nativeServeScorer loads the model from the cache only: serve owns stdin
+// (the request stream), so it can neither prompt to sign in nor show a
+// download bar. A model that is not cached is an error until `summon` runs.
+func nativeServeScorer(ctx context.Context, o ScanOptions, _ io.Writer) (s serveScorer, err error) {
+	path, sha, repo, rev := o.ModelPath, "", o.ModelRepo, o.ModelRevision
+	if path == "" {
+		path, sha, err = hub.Cached(hub.Options{Repo: o.ModelRepo, Revision: o.ModelRevision})
+		if err != nil {
+			return nil, fmt.Errorf("model not cached; run `%s summon` first", brand.Binary)
+		}
+	} else {
+		repo, rev = "local:"+filepath.Base(path), ""
+	}
+	n := &nativeScorer{o: o, repo: repo, rev: rev}
+	defer func() {
+		if err != nil {
+			_ = n.Close()
+		}
+	}()
+	if n.tok, err = tokenize.New(); err != nil {
+		return nil, err
+	}
+	if n.iso, err = ast.NewIsolated(0); err != nil {
+		return nil, err
+	}
+	devices := o.Devices
+	if len(devices) == 0 {
+		devices = []int{0}
+	}
+	for _, d := range devices {
+		e, err := engine.Open(engine.Options{ModelPath: path, ModelSHA: sha, Precision: o.Precision, Device: o.Device, DeviceIndex: d})
+		if err != nil {
+			return nil, err
+		}
+		n.engines = append(n.engines, e)
+		if err := warmUp(ctx, e); err != nil {
+			return nil, err
+		}
+		if o.Device == "cpu" || e.Info().Backend != "cuda" {
+			break // one engine per GPU; CPU and Metal have a single device
+		}
+	}
+	return n, nil
+}
+
+func (n *nativeScorer) Score(ctx context.Context, root string, files []walk.File) (*report.Report, error) {
+	cfg := pipeline.Config{
+		Isolate:     n.iso,
+		Root:        root,
+		Files:       files,
+		AST:         ast.Options{NoResidual: !n.o.TopLevel},
+		BatchTokens: n.o.BatchTokens,
+		Jobs:        n.o.Jobs,
+		MinTokens:   n.o.MinTokens,
+		Threshold:   n.o.Threshold,
+		NoCache:     n.o.NoCache,
+		CacheDir:    hub.ScoresDir(),
+		ModelRepo:   n.repo, ModelRevision: n.rev, Precision: n.o.Precision,
+	}
+	return pipeline.Run(ctx, cfg, n.engines, n.tok, nil)
+}
+
+func (n *nativeScorer) Close() error {
+	for _, e := range n.engines {
+		_ = e.Close()
+	}
+	if n.tok != nil {
+		_ = n.tok.Close() // shutting down: nothing to do with a close error
+	}
+	if n.iso != nil {
+		n.iso.Close()
+	}
+	return nil
 }
 
 func nativeScan(ctx context.Context, o ScanOptions, prog *report.Progress) (*report.Report, error) {
@@ -94,6 +181,8 @@ func nativeScan(ctx context.Context, o ScanOptions, prog *report.Progress) (*rep
 		NoCache:     o.NoCache,
 		CacheDir:    hub.ScoresDir(),
 		ModelRepo:   repo, ModelRevision: rev, Precision: o.Precision,
+		OnResult: o.OnResult,
+		OnFile:   o.OnFile,
 	}
 	if !early {
 		es, err := open(ctx)

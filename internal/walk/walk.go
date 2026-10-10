@@ -81,7 +81,7 @@ const maxDepth = 128
 // swamp a scan without being the project's own code.
 var DefaultSkipDirs = []string{
 	// VCS metadata and git worktree checkouts
-	".git", ".hg", ".svn", ".bzr", "_darcs", ".worktrees",
+	".git", ".hg", ".svn", ".bzr", "_darcs", ".worktrees", ".vakt",
 	// JavaScript / TypeScript
 	"node_modules", "bower_components", "jspm_packages", ".pnpm-store", ".yarn",
 	".next", ".nuxt", ".svelte-kit", ".angular", ".parcel-cache", ".turbo",
