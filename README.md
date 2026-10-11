@@ -12,7 +12,6 @@
 
 <br/>
 
-<a href="https://github.com/Vaktex/vakt/actions/workflows/build.yml"><img src="https://github.com/Vaktex/vakt/actions/workflows/build.yml/badge.svg?branch=main" alt="Build"></a>
 <a href="LICENSE"><img src="https://img.shields.io/badge/License-PolyForm%20Noncommercial-3b82f6?style=flat-square" alt="License"></a>
 <a href="https://huggingface.co/vaktex/dom-oss-0.8b"><img src="https://img.shields.io/badge/Model-DOM--0.8B-f0b90b?style=flat-square&logo=huggingface&logoColor=white" alt="DOM-0.8B on Hugging Face"></a>
 
