@@ -182,6 +182,16 @@ export HF_TOKEN="hf_..."            # or run `hf auth login`
 export VAKT_CACHE="$HOME/.vakt"     # optional: move all of vakt's caches
 ```
 
+## Vaktex account
+
+Scanning needs no account. `vakt login` links the CLI to a Vaktex account for the cloud features: it shows a short code, opens vaktex.com in your browser to confirm it, and stores a token in your config directory (`~/.config/vakt/credentials.json` on Linux, readable only by you). Signing in sends this machine's name and nothing else; no code leaves the machine.
+
+```bash
+vakt login     # sign in (--no-browser to just print the link)
+vakt account   # plan and usage (--json for scripts)
+vakt logout    # revoke the token and remove it
+```
+
 ## Use vakt from a coding agent
 
 `vakt mcp` serves the scanner over the [Model Context Protocol](https://modelcontextprotocol.io) on stdin/stdout, so an agent can scan code and read the findings as structured data instead of parsing the terminal report. Add it to `.cursor/mcp.json`, `claude_desktop_config.json` or your agent's equivalent:

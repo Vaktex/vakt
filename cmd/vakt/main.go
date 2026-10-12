@@ -120,6 +120,9 @@ func newRootCmd(stdin io.Reader, stdout, stderr io.Writer) *cobra.Command {
 		newServeCmd(),
 		newShowCmd(),
 		newMCPCmd(),
+		newLoginCmd(),
+		newLogoutCmd(),
+		newAccountCmd(),
 		newVersionCmd(),
 	)
 	return root

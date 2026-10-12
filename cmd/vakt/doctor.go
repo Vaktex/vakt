@@ -136,6 +136,13 @@ func runDoctorCount(ctx context.Context, w io.Writer, goos string, bench bool) (
 		d.row("hf token", "no (needed to download the gated model; set HF_TOKEN or run `hf auth login`)")
 	}
 
+	d.section("Account")
+	if s, ok := accountStatus(); ok {
+		d.row("vaktex", s)
+	} else {
+		d.warn("vaktex", s)
+	}
+
 	fmt.Fprintln(w)
 	if d.warns == 0 {
 		fmt.Fprintln(w, "All checks passed.")

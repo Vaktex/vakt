@@ -26,6 +26,8 @@ func runCLI(t *testing.T, stdin string, args ...string) (code int, stdout, stder
 func isolate(t *testing.T) {
 	t.Helper()
 	t.Setenv("VAKT_CACHE", t.TempDir())
+	t.Setenv("VAKT_CONFIG_DIR", t.TempDir())
+	t.Setenv("VAKT_CLOUD_URL", "")
 	t.Setenv("HF_HOME", t.TempDir())
 	t.Setenv("HF_TOKEN", "")
 	t.Setenv("HUGGING_FACE_HUB_TOKEN", "")
@@ -44,8 +46,11 @@ Usage:
   vakt [command]
 
 Available Commands:
+  account     Show your Vaktex account and usage
   doctor      Check this machine, the engine and the model cache
   help        Help about any command
+  login       Sign in to your Vaktex account
+  logout      Sign out and remove the stored token
   mcp         Serve Vaktex OSS to a coding agent over the Model Context Protocol
   patrol      Scan a codebase and report the functions most likely to be vulnerable
   report      Re-render a saved JSON report
@@ -371,7 +376,7 @@ func TestDoctor(t *testing.T) {
 		t.Fatal(err)
 	}
 	out := b.String()
-	for _, want := range []string{"Apple M5 Pro", "engine not linked", "not cached", "hf token         no", brand.ModelRepo} {
+	for _, want := range []string{"Apple M5 Pro", "engine not linked", "not cached", "hf token         no", brand.ModelRepo, "vaktex           not signed in"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("darwin doctor missing %q:\n%s", want, out)
 		}
